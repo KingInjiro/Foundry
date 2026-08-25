@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "format": "web-game",
+  "gameId": "generic-e2e",
+  "gameVersion": "1.0.0",
+  "name": "Generic E2E",
+  "runtime": "web",
+  "entry": "index.html",
+  "capabilities": []
+}

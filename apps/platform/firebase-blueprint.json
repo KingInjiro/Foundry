@@ -1,0 +1,31 @@
+{
+  "collections": [
+    {
+      "name": "users",
+      "description": "User profiles representing developers, players, and admins",
+      "fields": [
+        { "name": "uid", "type": "string", "description": "Firebase Auth UID" },
+        { "name": "email", "type": "string", "description": "User email address" },
+        { "name": "displayName", "type": "string", "description": "User display name" },
+        { "name": "avatarUrl", "type": "string", "description": "URL to user's avatar" },
+        { "name": "role", "type": "string", "description": "DEVELOPER, PLAYER, ADMIN" },
+        { "name": "createdAt", "type": "timestamp" },
+        { "name": "updatedAt", "type": "timestamp" }
+      ]
+    },
+    {
+      "name": "games",
+      "description": "Games published on the platform",
+      "fields": [
+        { "name": "id", "type": "string" },
+        { "name": "ownerUid", "type": "string", "description": "Reference to users.uid" },
+        { "name": "title", "type": "string" },
+        { "name": "description", "type": "string" },
+        { "name": "storageMode", "type": "string" },
+        { "name": "currentState", "type": "string" },
+        { "name": "createdAt", "type": "timestamp" },
+        { "name": "updatedAt", "type": "timestamp" }
+      ]
+    }
+  ]
+}

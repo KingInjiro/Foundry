@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "runtime": {
+    "entry": "boot.chunk",
+    "capabilities": ["webgl2", "wasm"],
+    "minRuntimeVersion": "1.0.0"
+  },
+  "chunks": [
+    {
+      "id": "boot-chunk-001",
+      "url": "chunks/boot-chunk-001.bin",
+      "size": 1048576,
+      "compressedSize": 512000,
+      "hash": "sha256-abc123def456",
+      "dependencies": [],
+      "priority": "critical",
+      "preload": true
+    },
+    {
+      "id": "core-assets-002",
+      "url": "chunks/core-assets-002.bin",
+      "size": 5242880,
+      "compressedSize": 3145728,
+      "hash": "sha256-def456abc123",
+      "dependencies": [
+        {
+          "chunkId": "boot-chunk-001",
+          "required": true
+        }
+      ],
+      "priority": "high",
+      "preload": true
+    },
+    {
+      "id": "optional-audio-003",
+      "url": "chunks/optional-audio-003.bin",
+      "size": 15728640,
+      "hash": "sha256-789xyz123",
+      "dependencies": [
+        {
+          "chunkId": "core-assets-002",
+          "required": false
+        }
+      ],
+      "priority": "low",
+      "preload": false
+    },
+    {
+      "id": "cyclic-a",
+      "url": "chunks/cyclic-a.bin",
+      "size": 1024,
+      "hash": "sha256-aaaa",
+      "dependencies": [
+        { "chunkId": "cyclic-b", "required": true }
+      ],
+      "priority": "medium",
+      "preload": false
+    },
+    {
+      "id": "cyclic-b",
+      "url": "chunks/cyclic-b.bin",
+      "size": 1024,
+      "hash": "sha256-bbbb",
+      "dependencies": [
+        { "chunkId": "cyclic-a", "required": true }
+      ],
+      "priority": "medium",
+      "preload": false
+    }
+  ]
+}

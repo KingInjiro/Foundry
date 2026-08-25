@@ -1,0 +1,1 @@
+import '@foundry/player/sandbox';

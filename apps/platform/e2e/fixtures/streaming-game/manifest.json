@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "format": "foundry-game",
+  "gameId": "streaming-game",
+  "gameVersion": "1.0.0",
+  "name": "Streaming Test Game",
+  "runtime": "foundry",
+  "engineVersion": "0.1.0",
+  "entry": "game.js",
+  "streamingManifest": "streaming-manifest.json",
+  "capabilities": [
+    "audio",
+    "storage"
+  ]
+}

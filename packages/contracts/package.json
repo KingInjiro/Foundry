@@ -1,0 +1,25 @@
+{
+  "name": "@foundry/contracts",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js",
+    "./streaming": "./src/streaming/constants.js",
+    "./streaming/types": "./src/streaming/AssetManifest.ts",
+    "./streaming/schema": "./src/streaming/AssetManifestSchema.ts",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "devDependencies": {
+    "vitest": "^4.1.10",
+    "typescript": "~5.8.2"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "verify": "node ../../scripts/verify-imports.mjs ."
+  }
+}

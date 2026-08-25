@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "runtime": {
+    "entry": "game.js"
+  },
+  "chunks": [
+    {
+      "id": "chunk-1",
+      "url": "test-asset.json",
+      "size": 19,
+      "hash": "sha256-3cb69d6aedd4dd728c9d8e88a40c58db09bdb69b2551f865595eb29c54eb5256",
+      "dependencies": [],
+      "priority": "critical",
+      "preload": false
+    }
+  ]
+}

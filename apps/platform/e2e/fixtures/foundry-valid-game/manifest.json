@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "format": "foundry-game",
+  "gameId": "foundry-e2e",
+  "gameVersion": "1.0.0",
+  "name": "Foundry E2E",
+  "runtime": "foundry",
+  "engineVersion": "0.1.0",
+  "entry": "main.js",
+  "capabilities": []
+}

@@ -1,0 +1,1 @@
+{ "compilerOptions": { "allowJs": true, "noEmit": true, "skipLibCheck": true, "jsx": "react" }, "include": ["src/**/*"], "exclude": ["src/engine/simulations/swarm/boids.ts"] }

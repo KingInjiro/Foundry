@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "runtime": {
+    "entry": "boot.chunk",
+    "capabilities": []
+  },
+  "chunks": [
+    {
+      "id": "boot.chunk",
+      "url": "boot.chunk",
+      "size": 128,
+      "hash": "sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "dependencies": [],
+      "priority": "critical",
+      "preload": true
+    },
+    {
+      "id": "scene.chunk",
+      "url": "scene.chunk",
+      "size": 256,
+      "hash": "sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "dependencies": [{ "chunkId": "boot.chunk", "required": true }],
+      "priority": "high",
+      "preload": true
+    },
+    {
+      "id": "audio.chunk",
+      "url": "audio.chunk",
+      "size": 512,
+      "hash": "sha256-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "dependencies": [],
+      "priority": "medium",
+      "preload": false
+    },
+    {
+      "id": "textures.chunk",
+      "url": "textures.chunk",
+      "size": 1024,
+      "hash": "sha256-dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "dependencies": [{ "chunkId": "scene.chunk", "required": true }],
+      "priority": "low",
+      "preload": false
+    },
+    {
+      "id": "optional.chunk",
+      "url": "optional.chunk",
+      "size": 64,
+      "hash": "sha256-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "dependencies": [],
+      "priority": "low",
+      "preload": false
+    }
+  ]
+}

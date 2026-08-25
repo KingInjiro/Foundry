@@ -1,0 +1,9 @@
+<!DOCTYPE html>
+<html>
+<body>
+  <div data-testid="generic-game-ready">GENERIC E2E GAME READY</div>
+  <script>
+    window.parent.postMessage({ type: 'GAME_READY' }, '*');
+  </script>
+</body>
+</html>

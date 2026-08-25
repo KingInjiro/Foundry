@@ -1,0 +1,70 @@
+{
+  "name": "@foundry/engine",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "exports": {
+    ".": "./src/engine/index.js",
+    "./editor": "./src/editor/App.jsx",
+    "./editor/*": "./src/editor/*",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "assets",
+    "tools",
+    "examples",
+    "README.md",
+    "ENGINE_API.md",
+    "ENGINE_BOUNDARY.md",
+    "ENGINE_VERSION"
+  ],
+  "dependencies": {
+    "cannon-es": "^0.20.0",
+    "matter-js": "^0.20.0",
+    "three": "^0.185.1"
+  },
+  "peerDependencies": {
+    "@monaco-editor/react": "^4.7.0",
+    "@xyflow/react": "^12.11.2",
+    "file-saver": "^2.0.5",
+    "firebase": "^12.16.0",
+    "jszip": "^3.10.1",
+    "lucide-react": "^0.546.0",
+    "motion": "^12.23.24",
+    "react": "^19.0.1",
+    "react-dom": "^19.0.1"
+  },
+  "peerDependenciesMeta": {
+    "@monaco-editor/react": {
+      "optional": true
+    },
+    "@xyflow/react": {
+      "optional": true
+    },
+    "file-saver": {
+      "optional": true
+    },
+    "firebase": {
+      "optional": true
+    },
+    "jszip": {
+      "optional": true
+    },
+    "lucide-react": {
+      "optional": true
+    },
+    "motion": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    },
+    "react-dom": {
+      "optional": true
+    }
+  },
+  "scripts": {
+    "verify": "node ../../scripts/verify-imports.mjs ."
+  }
+}

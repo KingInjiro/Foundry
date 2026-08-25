@@ -1,0 +1,27 @@
+{
+  "name": "foundry",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w @foundry/platform",
+    "dev:local": "npm run dev:local -w @foundry/platform",
+    "local:reset": "npm run local:reset -w @foundry/platform",
+    "build": "npm run build -w @foundry/platform",
+    "test": "npm run test -w @foundry/contracts && npm run test -w @foundry/player && npm run test -w @foundry/platform",
+    "test:platform": "npm run test -w @foundry/platform",
+    "test:e2e": "npm run test:e2e -w @foundry/platform",
+    "test:smoke": "npm run test:smoke -w @foundry/platform",
+    "fixture:streaming": "npm run fixture:streaming -w @foundry/platform",
+    "verify:imports": "node scripts/verify-imports.mjs .",
+    "verify": "npm run verify:imports",
+    "check": "npm run verify && npm run lint -w @foundry/platform && npm test && npm run build"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

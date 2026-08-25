@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "format": "web-game",
+  "gameId": "invalid-capability-e2e",
+  "gameVersion": "1.0.0",
+  "name": "Invalid Capability E2E",
+  "runtime": "web",
+  "entry": "index.html",
+  "capabilities": [
+    "hax"
+  ]
+}
