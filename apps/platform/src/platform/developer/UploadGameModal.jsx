@@ -1,11 +1,10 @@
-import { apiClient } from '../api/apiClient.js';
 import React, { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { AlertCircle, ArrowRight, CheckCircle2, FileArchive, UploadCloud, X } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { QuotaConfig } from '../backend/config/quotas.js';
-import { uploadFileWithProgress } from './uploadFileWithProgress.js';
 import { validatePackageOffMainThread } from './packageValidationClient.js';
+import { uploadPackageToPlatform } from './platformUploadService.js';
 
 const MAX_PACKAGE_BYTES = Number(QuotaConfig.PLATFORM_MAX_PACKAGE_SIZE_BYTES);
 
@@ -17,7 +16,7 @@ function formatBytes(bytes) {
     return `${value >= 10 || index === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`;
 }
 
-export function UploadGameModal({ isOpen, onClose, gameId, onUploaded }) {
+export function UploadGameModal({ isOpen, onClose, gameId, recoverySession = null, onUploaded }) {
     const navigate = useNavigate();
     const fileInputRef = useRef(null);
     const uploadAbortRef = useRef(null);
@@ -46,8 +45,8 @@ export function UploadGameModal({ isOpen, onClose, gameId, onUploaded }) {
         setStreamingManifestPath(null);
         setUploaded(null);
         setDragActive(false);
-        setCreatedGameId(null);
-        setPendingUpload(null);
+        setCreatedGameId(recoverySession?.gameId || null);
+        setPendingUpload(recoverySession || null);
         setUploadRetryAvailable(false);
         setUploadProgress(0);
         setUploadPhase('transferring');
@@ -77,7 +76,7 @@ export function UploadGameModal({ isOpen, onClose, gameId, onUploaded }) {
         setManifest(null);
         setStreamingManifestPath(null);
         setUploaded(null);
-        setPendingUpload(null);
+        if (!recoverySession) setPendingUpload(null);
         setUploadRetryAvailable(false);
         setUploadProgress(0);
         setUploadPhase('transferring');
@@ -118,72 +117,29 @@ export function UploadGameModal({ isOpen, onClose, gameId, onUploaded }) {
         setUploadRetryAvailable(false);
         setUploadProgress(0);
         setUploadPhase('transferring');
-        let canRetryCurrentSession = false;
-
         try {
-            let targetGameId = gameId || createdGameId;
-            if (!targetGameId) {
-                const gameResponse = await apiClient.post('/api/games', {
-                    title: manifest.name,
-                    description: manifest.description || ''
-                });
-                const gameResult = await gameResponse.json();
-                if (!gameResponse.ok || !gameResult.success) {
-                    throw new Error(gameResult.error?.message || 'Could not create the game project.');
-                }
-                targetGameId = gameResult.data.id;
-                setCreatedGameId(targetGameId);
-                onUploaded?.({ gameId: targetGameId, projectCreated: true });
-            }
-
             const fileSignature = `${file.name}:${file.size}:${file.lastModified || 0}`;
-            let uploadSession = pendingUpload?.gameId === targetGameId && pendingUpload?.fileSignature === fileSignature
+            const targetGameId = gameId || createdGameId || pendingUpload?.gameId || null;
+            const uploadSession = pendingUpload && (!pendingUpload.fileSignature || pendingUpload.fileSignature === fileSignature)
                 ? pendingUpload
                 : null;
-            if (!uploadSession) {
-                const versionResponse = await apiClient.post(`/api/games/${targetGameId}/versions`, { expectedSize: file.size });
-                const versionResult = await versionResponse.json();
-                if (!versionResponse.ok || !versionResult.success) {
-                    throw new Error(versionResult.error?.message || 'Could not start the upload.');
-                }
-                uploadSession = { ...versionResult.data, gameId: targetGameId, fileSignature };
-                setPendingUpload(uploadSession);
-            }
-
-            const { uploadUrl, sessionId, versionId } = uploadSession;
-            canRetryCurrentSession = true;
             const abortController = new AbortController();
             uploadAbortRef.current = abortController;
-            await uploadFileWithProgress({
-                url: uploadUrl,
+            const uploadResult = await uploadPackageToPlatform({
                 file,
+                manifest,
+                gameId: targetGameId,
+                uploadSession,
                 signal: abortController.signal,
-                onProgress: progress => setUploadProgress(progress.percentage)
+                onSession: session => {
+                    setCreatedGameId(session.gameId);
+                    setPendingUpload({ ...session, fileSignature });
+                },
+                onProgress: progress => setUploadProgress(progress.percentage),
+                onPhase: phase => setUploadPhase(phase === 'validating' ? 'finalizing' : 'transferring')
             });
             uploadAbortRef.current = null;
             setUploadProgress(100);
-            setUploadPhase('finalizing');
-
-            const completeResponse = await apiClient.post(`/api/uploads/${sessionId}/complete`, {});
-            const completeResult = await completeResponse.json();
-            if (!completeResponse.ok || !completeResult.success) {
-                canRetryCurrentSession = false;
-                setPendingUpload(null);
-                const details = completeResult.error?.details;
-                if (Array.isArray(details) && details.length) {
-                    setErrors(details);
-                    setStatus('error');
-                    return;
-                }
-                throw new Error(completeResult.error?.message || 'Server validation failed.');
-            }
-
-            const uploadResult = {
-                gameId: targetGameId,
-                versionId,
-                manifest: completeResult.data.manifest || manifest,
-                streamingManifestPath: completeResult.data.streamingManifestPath || null
-            };
             setUploaded(uploadResult);
             setPendingUpload(null);
             setStatus('success');
@@ -191,8 +147,16 @@ export function UploadGameModal({ isOpen, onClose, gameId, onUploaded }) {
         } catch (error) {
             uploadAbortRef.current = null;
             setStatus('error');
-            setUploadRetryAvailable(canRetryCurrentSession);
-            setErrors([{ code: error.code || 'UPLOAD_FAILED', message: error.message || 'Upload failed.' }]);
+            const resumable = Boolean(error.uploadSession) && ['NETWORK_ERROR', 'REQUEST_TIMEOUT', 'REQUEST_ABORTED', 'UPLOAD_FAILED'].includes(error.code || 'UPLOAD_FAILED');
+            if (error.uploadSession) {
+                const fileSignature = `${file.name}:${file.size}:${file.lastModified || 0}`;
+                setPendingUpload({ ...error.uploadSession, fileSignature });
+                setCreatedGameId(error.uploadSession.gameId);
+            }
+            setUploadRetryAvailable(resumable);
+            setErrors(Array.isArray(error.details) && error.details.length
+                ? error.details
+                : [{ code: error.code || 'UPLOAD_FAILED', message: error.message || 'Upload failed.' }]);
         }
     };
 
@@ -241,10 +205,12 @@ export function UploadGameModal({ isOpen, onClose, gameId, onUploaded }) {
 
                     <h2 id="upload-game-title" className="text-2xl font-bold mb-2 flex items-center gap-2 pr-8">
                         <UploadCloud className="w-6 h-6 text-blue-400" />
-                        {gameId ? 'Upload New Version' : 'Upload Game Package'}
+                        {recoverySession ? 'Resume Interrupted Upload' : gameId ? 'Upload New Version' : 'Upload Game Package'}
                     </h2>
                     <p className="text-neutral-400 text-sm mb-6">
-                        Choose a ZIP with a root <code className="text-neutral-300">manifest.json</code>. Foundry validates it locally before any upload.
+                        {recoverySession
+                            ? <>Select the same ZIP ({formatBytes(Number(recoverySession.expectedSize || 0))}) to resume this existing session without creating a duplicate version.</>
+                            : <>Choose a ZIP with a root <code className="text-neutral-300">manifest.json</code>. Foundry validates it locally before any upload.</>}
                     </p>
 
                     {status !== 'success' && (
@@ -360,7 +326,7 @@ export function UploadGameModal({ isOpen, onClose, gameId, onUploaded }) {
                             disabled={busy}
                             className="px-4 py-2.5 text-sm font-medium text-neutral-300 hover:text-white disabled:opacity-40 transition-colors"
                         >
-                            {status === 'success' ? 'Back to Dashboard' : 'Cancel'}
+                            {status === 'success' ? (gameId ? 'Close' : 'Back to Dashboard') : 'Cancel'}
                         </button>
                         {(status === 'valid' || (status === 'error' && uploadRetryAvailable && manifest)) && (
                             <button

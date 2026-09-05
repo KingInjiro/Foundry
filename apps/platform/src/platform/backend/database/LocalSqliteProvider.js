@@ -1,7 +1,9 @@
 import { DatabaseSync } from 'node:sqlite';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { DatabaseProvider } from './DatabaseProvider.js';
+import { PLATFORM_MIGRATIONS, SqliteMigrationRunner } from './SqliteMigrationRunner.js';
 
 const GAME_VERSION_METADATA_FIELDS = new Set([
     'version',
@@ -41,12 +43,29 @@ function escapeLikePattern(value) {
     return String(value || '').replace(/[\\%_]/g, match => `\\${match}`);
 }
 
+export function configureSqliteConnection(database, dbPath) {
+    database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
+    if (dbPath === ':memory:') return;
+
+    // WAL mode is persistent in the database header. Reissuing the mode-change
+    // pragma from an operator/doctor process while the service is writing can
+    // fail even though the file is already correctly configured for WAL.
+    const currentMode = database.prepare('PRAGMA journal_mode;').get()?.journal_mode;
+    if (String(currentMode || '').toLowerCase() !== 'wal') {
+        database.exec('PRAGMA journal_mode = WAL;');
+    }
+    database.exec('PRAGMA synchronous = NORMAL;');
+}
+
 export class LocalSqliteProvider extends DatabaseProvider {
     constructor(dbPath = '.data/platform.db') {
         super();
+        this.transactionContext = new AsyncLocalStorage();
+        this.transactionTail = Promise.resolve();
+        this.closing = false;
+        this.closed = false;
         const dir = path.dirname(dbPath); if (dir !== '.') { fs.mkdirSync(dir, { recursive: true }); } this.db = new DatabaseSync(dbPath);
-        this.db.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
-        if (dbPath !== ':memory:') this.db.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;');
+        configureSqliteConnection(this.db, dbPath);
         this.init();
     }
 
@@ -69,6 +88,7 @@ export class LocalSqliteProvider extends DatabaseProvider {
                 description TEXT,
                 storageMode TEXT,
                 currentState TEXT,
+                moderationState TEXT NOT NULL DEFAULT 'ACTIVE',
                 createdAt INTEGER,
                 updatedAt INTEGER
             );
@@ -138,6 +158,7 @@ export class LocalSqliteProvider extends DatabaseProvider {
 
             CREATE TABLE IF NOT EXISTS schema_migrations (
                 version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
                 appliedAt INTEGER NOT NULL
             );
 
@@ -190,77 +211,63 @@ export class LocalSqliteProvider extends DatabaseProvider {
                 ON continue_playing_dismissals (userUid, dismissedAt);
             CREATE INDEX IF NOT EXISTS idx_rate_limit_updated
                 ON rate_limit_buckets (updatedAt);
-            CREATE INDEX IF NOT EXISTS idx_jobs_claim
-                ON jobs (status, leaseExpiresAt, createdAt);
+            CREATE TABLE IF NOT EXISTS editor_projects (
+                id TEXT PRIMARY KEY,
+                ownerUid TEXT NOT NULL,
+                title TEXT NOT NULL,
+                files TEXT NOT NULL,
+                platformGameId TEXT,
+                lastReadyVersionId TEXT,
+                createdAt INTEGER NOT NULL,
+                updatedAt INTEGER NOT NULL,
+                FOREIGN KEY (platformGameId) REFERENCES games(id) ON DELETE SET NULL,
+                FOREIGN KEY (lastReadyVersionId) REFERENCES game_versions(id) ON DELETE SET NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_editor_projects_owner_updated
+                ON editor_projects (ownerUid, updatedAt DESC);
+            CREATE INDEX IF NOT EXISTS idx_editor_projects_platform_game
+                ON editor_projects (platformGameId);
+
+            CREATE TABLE IF NOT EXISTS game_reports (
+                id TEXT PRIMARY KEY,
+                gameId TEXT NOT NULL,
+                reporterUid TEXT NOT NULL,
+                category TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'OPEN',
+                createdAt INTEGER NOT NULL,
+                resolvedAt INTEGER,
+                resolvedByUid TEXT,
+                resolution TEXT,
+                updatedAt INTEGER,
+                FOREIGN KEY (gameId) REFERENCES games(id) ON DELETE CASCADE,
+                FOREIGN KEY (reporterUid) REFERENCES users(uid) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_game_reports_game_status
+                ON game_reports (gameId, status, createdAt DESC);
+            CREATE INDEX IF NOT EXISTS idx_game_reports_reporter_time
+                ON game_reports (reporterUid, createdAt DESC);
+            CREATE INDEX IF NOT EXISTS idx_game_reports_status_time
+                ON game_reports (status, createdAt DESC);
+            CREATE TABLE IF NOT EXISTS moderation_actions (
+                id TEXT PRIMARY KEY,
+                gameId TEXT NOT NULL,
+                reportId TEXT,
+                operatorUid TEXT NOT NULL,
+                action TEXT NOT NULL,
+                previousState TEXT NOT NULL,
+                nextState TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                createdAt INTEGER NOT NULL,
+                FOREIGN KEY (gameId) REFERENCES games(id) ON DELETE CASCADE,
+                FOREIGN KEY (reportId) REFERENCES game_reports(id) ON DELETE SET NULL,
+                FOREIGN KEY (operatorUid) REFERENCES users(uid) ON DELETE RESTRICT
+            );
+            CREATE INDEX IF NOT EXISTS idx_moderation_actions_game_time
+                ON moderation_actions (gameId, createdAt DESC);
 
         `);
-
-        // Migration for existing databases
-        const addColumn = (table, col, def) => {
-            try {
-                this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def};`);
-            } catch (e) {
-                // Column might already exist
-            }
-        };
-        addColumn('game_versions', 'runtimeUrl', 'TEXT');
-        addColumn('game_versions', 'streamingManifestPath', 'TEXT');
-        addColumn('game_versions', 'capabilities', "TEXT NOT NULL DEFAULT '[]'");
-        addColumn('game_versions', 'thumbnail', 'TEXT');
-        addColumn('game_versions', 'tags', "TEXT NOT NULL DEFAULT '[]'");
-        addColumn('game_versions', 'controls', "TEXT NOT NULL DEFAULT '[]'");
-        addColumn('game_versions', 'publishedAt', 'INTEGER');
-        addColumn('game_versions', 'packageSha256', 'TEXT');
-        addColumn('game_versions', 'publishError', 'TEXT');
-        addColumn('game_versions', 'publishAttempts', 'INTEGER DEFAULT 0');
-        addColumn('game_versions', 'extractedSizeBytes', 'INTEGER DEFAULT 0');
-        addColumn('game_versions', 'packageSizeBytes', 'INTEGER DEFAULT 0');
-        addColumn('upload_sessions', 'updatedAt', 'INTEGER');
-        addColumn('upload_sessions', 'completedAt', 'INTEGER');
-        addColumn('upload_sessions', 'packageSizeBytes', 'INTEGER DEFAULT 0');
-        addColumn('jobs', 'workerId', 'TEXT');
-        addColumn('jobs', 'leaseExpiresAt', 'INTEGER');
-
-        // Repair legacy rows before enforcing the single-active-release invariant.
-        this.db.exec(`
-            UPDATE game_versions AS current
-            SET status = 'ARCHIVED'
-            WHERE current.status = 'PUBLISHED'
-              AND EXISTS (
-                SELECT 1
-                FROM game_versions AS newer
-                WHERE newer.gameId = current.gameId
-                  AND newer.status = 'PUBLISHED'
-                  AND (
-                    COALESCE(newer.publishedAt, newer.createdAt, 0) > COALESCE(current.publishedAt, current.createdAt, 0)
-                    OR (
-                        COALESCE(newer.publishedAt, newer.createdAt, 0) = COALESCE(current.publishedAt, current.createdAt, 0)
-                        AND newer.id > current.id
-                    )
-                  )
-              );
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_game_versions_one_active
-                ON game_versions (gameId)
-                WHERE status = 'PUBLISHED';
-            UPDATE jobs AS duplicate
-            SET status = 'FAILED', error = 'Superseded duplicate active job during schema migration.', completedAt = unixepoch('subsec') * 1000
-            WHERE duplicate.status IN ('QUEUED', 'RUNNING', 'RETRYING')
-              AND EXISTS (
-                SELECT 1 FROM jobs AS keeper
-                WHERE keeper.type = duplicate.type
-                  AND keeper.targetId = duplicate.targetId
-                  AND keeper.status IN ('QUEUED', 'RUNNING', 'RETRYING')
-                  AND (
-                    COALESCE(keeper.createdAt, 0) < COALESCE(duplicate.createdAt, 0)
-                    OR (COALESCE(keeper.createdAt, 0) = COALESCE(duplicate.createdAt, 0) AND keeper.id < duplicate.id)
-                  )
-              );
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_one_active_target
-                ON jobs (type, targetId)
-                WHERE status IN ('QUEUED', 'RUNNING', 'RETRYING');
-            INSERT OR IGNORE INTO schema_migrations (version, appliedAt)
-            VALUES (4, unixepoch('subsec') * 1000);
-        `);
+        new SqliteMigrationRunner(this.db, PLATFORM_MIGRATIONS).run();
     }
 
     async getUser(uid) {
@@ -275,6 +282,160 @@ export class LocalSqliteProvider extends DatabaseProvider {
         `);
         stmt.run(user.uid, user.email, user.displayName, user.avatarUrl, user.role, user.createdAt, user.updatedAt);
         return user;
+    }
+
+    async provisionUserRole({ uid, role, email = '', displayName = '' }) {
+        const existing = await this.getUser(uid);
+        const now = Date.now();
+        this.db.prepare(`
+            INSERT INTO users (uid, email, displayName, avatarUrl, role, createdAt, updatedAt)
+            VALUES (?, ?, ?, '', ?, ?, ?)
+            ON CONFLICT(uid) DO UPDATE SET role = excluded.role, updatedAt = excluded.updatedAt
+        `).run(uid, email, displayName || uid, role, now, now);
+        return { previousRole: existing?.role || null, user: await this.getUser(uid) };
+    }
+
+    async getLocalCredentialByUsername(usernameNormalized) {
+        return this.db.prepare(`
+            SELECT c.*, u.email, u.displayName, u.avatarUrl, u.role
+            FROM local_auth_credentials c
+            JOIN users u ON u.uid = c.uid
+            WHERE c.usernameNormalized = ?
+        `).get(usernameNormalized);
+    }
+
+    async getLocalCredentialByUid(uid) {
+        return this.db.prepare(`
+            SELECT c.*, u.email, u.displayName, u.avatarUrl, u.role
+            FROM local_auth_credentials c
+            JOIN users u ON u.uid = c.uid
+            WHERE c.uid = ?
+        `).get(uid);
+    }
+
+    async createLocalAccount({ user, username, usernameNormalized, passwordHash, now = Date.now() }) {
+        return this.runSerializedTransaction(async () => {
+            this.db.prepare(`
+                INSERT INTO users (uid, email, displayName, avatarUrl, role, createdAt, updatedAt)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            `).run(
+                user.uid,
+                user.email || '',
+                user.displayName,
+                user.avatarUrl || '',
+                user.role || 'DEVELOPER',
+                user.createdAt || now,
+                user.updatedAt || now
+            );
+            this.db.prepare(`
+                INSERT INTO local_auth_credentials (
+                    uid, username, usernameNormalized, passwordHash,
+                    disabledAt, passwordChangedAt, createdAt, updatedAt
+                ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?)
+            `).run(user.uid, username, usernameNormalized, passwordHash, now, now, now);
+            return this.getUser(user.uid);
+        });
+    }
+
+    async updateLocalPassword(uid, passwordHash, now = Date.now()) {
+        return this.runSerializedTransaction(async () => {
+            const result = this.db.prepare(`
+                UPDATE local_auth_credentials
+                SET passwordHash = ?, passwordChangedAt = ?, updatedAt = ?
+                WHERE uid = ?
+            `).run(passwordHash, now, now, uid);
+            if (!result.changes) return null;
+            this.db.prepare(`
+                UPDATE local_auth_sessions
+                SET revokedAt = COALESCE(revokedAt, ?)
+                WHERE uid = ? AND revokedAt IS NULL
+            `).run(now, uid);
+            return this.getLocalCredentialByUid(uid);
+        });
+    }
+
+    async setLocalUserDisabled(uid, disabled, now = Date.now()) {
+        return this.runSerializedTransaction(async () => {
+            const disabledAt = disabled ? now : null;
+            const result = this.db.prepare(`
+                UPDATE local_auth_credentials
+                SET disabledAt = ?, updatedAt = ?
+                WHERE uid = ?
+            `).run(disabledAt, now, uid);
+            if (!result.changes) return null;
+            if (disabled) {
+                this.db.prepare(`
+                    UPDATE local_auth_sessions
+                    SET revokedAt = COALESCE(revokedAt, ?)
+                    WHERE uid = ? AND revokedAt IS NULL
+                `).run(now, uid);
+            }
+            return this.getLocalCredentialByUid(uid);
+        });
+    }
+
+    async createLocalSession(session) {
+        this.db.prepare(`
+            INSERT INTO local_auth_sessions (tokenHash, uid, createdAt, expiresAt, lastSeenAt, revokedAt)
+            VALUES (?, ?, ?, ?, ?, NULL)
+        `).run(session.tokenHash, session.uid, session.createdAt, session.expiresAt, session.lastSeenAt);
+        return session;
+    }
+
+    async getLocalSession(tokenHash) {
+        return this.db.prepare(`
+            SELECT s.tokenHash, s.uid, s.createdAt, s.expiresAt, s.lastSeenAt, s.revokedAt,
+                   c.username, c.usernameNormalized, c.disabledAt, c.passwordChangedAt,
+                   u.email, u.displayName, u.avatarUrl, u.role
+            FROM local_auth_sessions s
+            JOIN local_auth_credentials c ON c.uid = s.uid
+            JOIN users u ON u.uid = s.uid
+            WHERE s.tokenHash = ?
+        `).get(tokenHash);
+    }
+
+    async touchLocalSession(tokenHash, lastSeenAt) {
+        const result = this.db.prepare(`
+            UPDATE local_auth_sessions
+            SET lastSeenAt = ?
+            WHERE tokenHash = ? AND revokedAt IS NULL
+        `).run(lastSeenAt, tokenHash);
+        return result.changes > 0;
+    }
+
+    async revokeLocalSession(tokenHash, revokedAt = Date.now()) {
+        const result = this.db.prepare(`
+            UPDATE local_auth_sessions
+            SET revokedAt = COALESCE(revokedAt, ?)
+            WHERE tokenHash = ?
+        `).run(revokedAt, tokenHash);
+        return result.changes > 0;
+    }
+
+    async revokeAllLocalSessions(uid, revokedAt = Date.now()) {
+        const result = this.db.prepare(`
+            UPDATE local_auth_sessions
+            SET revokedAt = COALESCE(revokedAt, ?)
+            WHERE uid = ? AND revokedAt IS NULL
+        `).run(revokedAt, uid);
+        return Number(result.changes || 0);
+    }
+
+    async deleteExpiredLocalSessions(now = Date.now()) {
+        const result = this.db.prepare(`
+            DELETE FROM local_auth_sessions
+            WHERE expiresAt <= ? OR revokedAt IS NOT NULL
+        `).run(now);
+        return Number(result.changes || 0);
+    }
+
+    async getLatestMigration() {
+        return this.db.prepare(`
+            SELECT version, name, appliedAt
+            FROM schema_migrations
+            ORDER BY version DESC
+            LIMIT 1
+        `).get() || null;
     }
 
     async getGame(id) {
@@ -303,6 +464,12 @@ export class LocalSqliteProvider extends DatabaseProvider {
         stmt.run(currentState, Date.now(), id);
     }
 
+    async updateGameModerationState(id, moderationState) {
+        const stmt = this.db.prepare('UPDATE games SET moderationState = ?, updatedAt = ? WHERE id = ?');
+        const result = stmt.run(moderationState, Date.now(), id);
+        return result.changes > 0 ? this.getGame(id) : null;
+    }
+
     async listGames(ownerUid) {
         if (ownerUid) {
             const stmt = this.db.prepare('SELECT * FROM games WHERE ownerUid = ? ORDER BY createdAt DESC');
@@ -311,6 +478,63 @@ export class LocalSqliteProvider extends DatabaseProvider {
 
         const stmt = this.db.prepare('SELECT * FROM games ORDER BY createdAt DESC');
         return stmt.all();
+    }
+
+    normalizeEditorProject(row) {
+        if (!row) return null;
+        let files;
+        try {
+            files = JSON.parse(row.files);
+        } catch {
+            files = null;
+        }
+        return { ...row, files };
+    }
+
+    async createEditorProject(project) {
+        this.db.prepare(`
+            INSERT INTO editor_projects (
+                id, ownerUid, title, files, platformGameId, lastReadyVersionId, createdAt, updatedAt
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+            project.id,
+            project.ownerUid,
+            project.title,
+            JSON.stringify(project.files),
+            project.platformGameId || null,
+            project.lastReadyVersionId || null,
+            project.createdAt,
+            project.updatedAt
+        );
+        return this.getEditorProject(project.id);
+    }
+
+    async getEditorProject(id) {
+        return this.normalizeEditorProject(this.db.prepare('SELECT * FROM editor_projects WHERE id = ?').get(id));
+    }
+
+    async listEditorProjects(ownerUid) {
+        return this.db.prepare('SELECT * FROM editor_projects WHERE ownerUid = ? ORDER BY updatedAt DESC')
+            .all(ownerUid)
+            .map(row => this.normalizeEditorProject(row));
+    }
+
+    async updateEditorProject(id, ownerUid, { title, files }) {
+        const result = this.db.prepare(`
+            UPDATE editor_projects
+            SET title = ?, files = ?, updatedAt = ?
+            WHERE id = ? AND ownerUid = ?
+        `).run(title, JSON.stringify(files), Date.now(), id, ownerUid);
+        return result.changes > 0 ? this.getEditorProject(id) : null;
+    }
+
+    async linkEditorProject(id, ownerUid, platformGameId, lastReadyVersionId = null) {
+        const result = this.db.prepare(`
+            UPDATE editor_projects
+            SET platformGameId = ?, lastReadyVersionId = ?, updatedAt = ?
+            WHERE id = ? AND ownerUid = ?
+        `).run(platformGameId || null, lastReadyVersionId || null, Date.now(), id, ownerUid);
+        return result.changes > 0 ? this.getEditorProject(id) : null;
     }
 
     async createGameVersion(version) {
@@ -351,6 +575,37 @@ export class LocalSqliteProvider extends DatabaseProvider {
         return stmt.get(versionId);
     }
 
+    async listUploadRecovery(ownerUid, limit = 50) {
+        const stmt = this.db.prepare(`
+            SELECT
+                g.id AS gameId,
+                g.title AS gameTitle,
+                g.currentState AS gameState,
+                v.id AS versionId,
+                v.version,
+                v.status AS versionStatus,
+                v.publishError,
+                v.createdAt AS versionCreatedAt,
+                s.id AS sessionId,
+                s.status AS sessionStatus,
+                s.expectedSize,
+                s.expiresAt,
+                s.updatedAt AS sessionUpdatedAt
+            FROM games g
+            INNER JOIN game_versions v ON v.gameId = g.id
+            LEFT JOIN upload_sessions s ON s.versionId = v.id
+            WHERE g.ownerUid = ?
+              AND (
+                v.status IN ('UPLOADING', 'VALIDATING', 'READY', 'PUBLISHING', 'PUBLISH_FAILED', 'DELETING')
+                OR g.currentState = 'DELETING'
+                OR s.status IN ('CREATED', 'VALIDATING', 'EXPIRED')
+              )
+            ORDER BY COALESCE(s.updatedAt, v.createdAt) DESC
+            LIMIT ?
+        `);
+        return stmt.all(ownerUid, Math.max(1, Math.min(Number(limit) || 50, 100)));
+    }
+
     async updateUploadSessionStatus(id, status) {
         const stmt = this.db.prepare('UPDATE upload_sessions SET status = ? WHERE id = ?');
         stmt.run(status, id);
@@ -366,7 +621,7 @@ export class LocalSqliteProvider extends DatabaseProvider {
             SELECT g.*, MAX(COALESCE(v.publishedAt, v.createdAt)) AS latestPublishedAt
             FROM games g
             INNER JOIN game_versions v ON g.id = v.gameId
-            WHERE v.status = 'PUBLISHED'
+            WHERE v.status = 'PUBLISHED' AND COALESCE(g.moderationState, 'ACTIVE') = 'ACTIVE'
             GROUP BY g.id
             ORDER BY latestPublishedAt DESC, g.createdAt DESC
         `);
@@ -445,6 +700,80 @@ export class LocalSqliteProvider extends DatabaseProvider {
         return result.changes > 0;
     }
 
+    async getCatalogRowsByGameIds(gameIds, userUid = null) {
+        const ids = [...new Set((gameIds || []).filter(id => typeof id === 'string' && id))].slice(0, 100);
+        if (ids.length === 0) return [];
+        const placeholders = ids.map(() => '?').join(',');
+        const userStateSql = userUid ? `
+            EXISTS(SELECT 1 FROM user_library library WHERE library.userUid = ? AND library.gameId = g.id) AS inLibrary,
+            (SELECT rating FROM game_ratings own_rating WHERE own_rating.userUid = ? AND own_rating.gameId = g.id) AS userRating,
+            CASE WHEN g.ownerUid = ? THEN 0 ELSE EXISTS(
+                SELECT 1 FROM developer_follows own_follow
+                WHERE own_follow.followerUid = ? AND own_follow.developerUid = g.ownerUid
+            ) END AS followingDeveloper
+        ` : '0 AS inLibrary, NULL AS userRating, 0 AS followingDeveloper';
+        const stmt = this.db.prepare(`
+            WITH rating_stats AS (
+                SELECT gameId, AVG(rating) AS rating, COUNT(*) AS ratingCount
+                FROM game_ratings
+                WHERE gameId IN (${placeholders})
+                GROUP BY gameId
+            ), discovery_stats AS (
+                SELECT gameId,
+                    SUM(CASE WHEN eventType = 'play_start' THEN 1 ELSE 0 END) AS playCount,
+                    SUM(CASE WHEN eventType = 'game_ready' THEN 1 ELSE 0 END) AS readyCount,
+                    SUM(CASE WHEN eventType = 'next_game' THEN 1 ELSE 0 END) AS nextCount,
+                    SUM(CASE WHEN eventType = 'game_error' THEN 1 ELSE 0 END) AS errorCount,
+                    AVG(CASE WHEN eventType = 'session_end' AND durationMs > 0 THEN durationMs END) AS avgSessionDurationMs
+                FROM discovery_events
+                WHERE gameId IN (${placeholders})
+                GROUP BY gameId
+            )
+            SELECT
+                g.id AS gameId,
+                g.title AS name,
+                g.description,
+                g.ownerUid AS developerUid,
+                v.id AS versionId,
+                v.version AS gameVersion,
+                v.runtime,
+                v.format,
+                v.entry,
+                v.runtimeUrl,
+                v.streamingManifestPath,
+                v.capabilities,
+                v.thumbnail,
+                v.tags,
+                v.controls,
+                COALESCE(v.publishedAt, v.createdAt, 0) AS publishedAt,
+                u.displayName AS developerName,
+                u.email AS developerEmail,
+                u.avatarUrl AS developerAvatarUrl,
+                ROUND(COALESCE(r.rating, 0), 2) AS rating,
+                COALESCE(r.ratingCount, 0) AS ratingCount,
+                COALESCE(d.playCount, 0) AS playCount,
+                COALESCE(d.readyCount, 0) AS readyCount,
+                COALESCE(d.nextCount, 0) AS nextCount,
+                COALESCE(d.errorCount, 0) AS errorCount,
+                ROUND(COALESCE(d.avgSessionDurationMs, 0)) AS avgSessionDurationMs,
+                ${userStateSql}
+            FROM games g
+            INNER JOIN game_versions v ON v.gameId = g.id AND v.status = 'PUBLISHED'
+            LEFT JOIN users u ON u.uid = g.ownerUid
+            LEFT JOIN rating_stats r ON r.gameId = g.id
+            LEFT JOIN discovery_stats d ON d.gameId = g.id
+            WHERE g.id IN (${placeholders})
+              AND COALESCE(g.moderationState, 'ACTIVE') = 'ACTIVE'
+        `);
+        const params = [
+            ...ids,
+            ...ids,
+            ...(userUid ? [userUid, userUid, userUid, userUid] : []),
+            ...ids
+        ];
+        return stmt.all(...params);
+    }
+
     async searchPublishedCatalog({ query = '', tag = '', sort = 'featured', limit = 25, offset = 0 } = {}) {
         const normalizedQuery = String(query || '').trim().toLocaleLowerCase();
         const normalizedTag = String(tag || '').trim().toLocaleLowerCase();
@@ -491,7 +820,8 @@ export class LocalSqliteProvider extends DatabaseProvider {
             LEFT JOIN users u ON u.uid = g.ownerUid
             LEFT JOIN rating_stats r ON r.gameId = g.id
             LEFT JOIN discovery_stats d ON d.gameId = g.id
-            WHERE (
+            WHERE COALESCE(g.moderationState, 'ACTIVE') = 'ACTIVE'
+              AND (
                 ? = ''
                 OR LOWER(COALESCE(g.title, '')) LIKE ? ESCAPE '\\'
                 OR LOWER(COALESCE(g.description, '')) LIKE ? ESCAPE '\\'
@@ -533,7 +863,8 @@ export class LocalSqliteProvider extends DatabaseProvider {
             INNER JOIN game_versions v ON v.gameId = g.id AND v.status = 'PUBLISHED'
             LEFT JOIN users u ON u.uid = g.ownerUid
             INNER JOIN json_each(CASE WHEN json_valid(v.tags) THEN v.tags ELSE '[]' END) AS tag
-            WHERE TRIM(CAST(tag.value AS TEXT)) <> ''
+            WHERE COALESCE(g.moderationState, 'ACTIVE') = 'ACTIVE'
+              AND TRIM(CAST(tag.value AS TEXT)) <> ''
               AND (
                 ? = ''
                 OR LOWER(COALESCE(g.title, '')) LIKE ? ESCAPE '\\'
@@ -759,11 +1090,97 @@ export class LocalSqliteProvider extends DatabaseProvider {
             SELECT g.*, MAX(COALESCE(v.publishedAt, v.createdAt)) AS latestPublishedAt
             FROM games g
             INNER JOIN game_versions v ON g.id = v.gameId
-            WHERE v.status = 'PUBLISHED' AND g.ownerUid IN (${placeholders})
+            WHERE v.status = 'PUBLISHED'
+              AND COALESCE(g.moderationState, 'ACTIVE') = 'ACTIVE'
+              AND g.ownerUid IN (${placeholders})
             GROUP BY g.id
             ORDER BY latestPublishedAt DESC, g.updatedAt DESC, g.createdAt DESC
         `);
         return stmt.all(...ownerUids);
+    }
+
+    async createGameReport(report) {
+        this.db.prepare(`
+            INSERT INTO game_reports (id, gameId, reporterUid, category, reason, status, createdAt, updatedAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(report.id, report.gameId, report.reporterUid, report.category, report.reason, report.status, report.createdAt, report.createdAt);
+        return report;
+    }
+
+    async getGameReport(id) {
+        return this.db.prepare('SELECT * FROM game_reports WHERE id = ?').get(id);
+    }
+
+    async listGameReports(gameId, status = null) {
+        if (status) {
+            return this.db.prepare('SELECT * FROM game_reports WHERE gameId = ? AND status = ? ORDER BY createdAt DESC')
+                .all(gameId, status);
+        }
+        return this.db.prepare('SELECT * FROM game_reports WHERE gameId = ? ORDER BY createdAt DESC').all(gameId);
+    }
+
+    async listModerationReports(status = 'OPEN', limit = 50) {
+        return this.db.prepare(`
+            SELECT r.*, g.title AS gameTitle, g.description AS gameDescription,
+                   g.ownerUid, g.moderationState, reporter.email AS reporterEmail,
+                   reporter.displayName AS reporterDisplayName
+            FROM game_reports r
+            INNER JOIN games g ON g.id = r.gameId
+            LEFT JOIN users reporter ON reporter.uid = r.reporterUid
+            WHERE (? = '' OR r.status = ?)
+            ORDER BY CASE WHEN r.status = 'OPEN' THEN 0 ELSE 1 END, r.createdAt DESC
+            LIMIT ?
+        `).all(status || '', status || '', Math.max(1, Math.min(Number(limit) || 50, 100)));
+    }
+
+    async countOpenGameReports() {
+        return Number(this.db.prepare("SELECT COUNT(*) AS count FROM game_reports WHERE status = 'OPEN'").get().count);
+    }
+
+    async resolveGameReport(id, { status, resolution, resolvedByUid, resolvedAt }) {
+        const result = this.db.prepare(`
+            UPDATE game_reports
+            SET status = ?, resolution = ?, resolvedByUid = ?, resolvedAt = ?, updatedAt = ?
+            WHERE id = ? AND status = 'OPEN'
+        `).run(status, resolution, resolvedByUid, resolvedAt, resolvedAt, id);
+        return result.changes > 0 ? this.getGameReport(id) : null;
+    }
+
+    async createModerationAction(action) {
+        this.db.prepare(`
+            INSERT INTO moderation_actions (
+                id, gameId, reportId, operatorUid, action, previousState, nextState, reason, createdAt
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+            action.id, action.gameId, action.reportId || null, action.operatorUid,
+            action.action, action.previousState, action.nextState, action.reason, action.createdAt
+        );
+        return action;
+    }
+
+    async listModerationActions(gameId) {
+        return this.db.prepare(`
+            SELECT a.*, operator.email AS operatorEmail, operator.displayName AS operatorDisplayName
+            FROM moderation_actions a
+            LEFT JOIN users operator ON operator.uid = a.operatorUid
+            WHERE a.gameId = ?
+            ORDER BY a.createdAt DESC
+        `).all(gameId);
+    }
+
+    async getStorageIntegritySnapshot() {
+        return {
+            versions: this.db.prepare(`
+                SELECT id, gameId, status, entry, runtimeUrl, streamingManifestPath
+                FROM game_versions
+                ORDER BY gameId, createdAt, id
+            `).all(),
+            uploadSessions: this.db.prepare(`
+                SELECT id, gameId, versionId, objectKey, status, expiresAt, completedAt
+                FROM upload_sessions
+                ORDER BY createdAt, id
+            `).all()
+        };
     }
 
     async recordDiscoveryEvent(event) {
@@ -863,8 +1280,7 @@ export class LocalSqliteProvider extends DatabaseProvider {
         const windowMs = Math.max(1000, Math.floor(Number(config?.windowMs) || 60000));
         const windowExpiredBefore = now - windowMs;
 
-        this.db.exec('BEGIN IMMEDIATE');
-        try {
+        return this.runSerializedTransaction(async () => {
             const row = this.db.prepare(`
                 SELECT windowStart, operationCount
                 FROM rate_limit_buckets
@@ -885,29 +1301,61 @@ export class LocalSqliteProvider extends DatabaseProvider {
                     operationCount = excluded.operationCount,
                     updatedAt = excluded.updatedAt
             `).run(normalizedIdentity, normalizedOperation, windowStart, nextCount, now);
-            this.db.exec('COMMIT');
-
             return {
                 allowed,
                 remaining: Math.max(0, max - nextCount),
                 resetAfterMs: Math.max(0, windowStart + windowMs - now)
             };
-        } catch (error) {
-            this.db.exec('ROLLBACK');
-            throw error;
-        }
+        });
     }
 
     async transaction(callback) {
-        // Simple transaction simulation
-        this.db.exec('BEGIN');
-        try {
-            const result = await callback(this);
-            this.db.exec('COMMIT');
-            return result;
-        } catch (e) {
-            this.db.exec('ROLLBACK');
-            throw e;
+        if (typeof callback !== 'function') {
+            throw new TypeError('LocalSqliteProvider.transaction requires a callback.');
+        }
+        return this.runSerializedTransaction(() => callback(this));
+    }
+
+    async runSerializedTransaction(callback) {
+        if (this.closing || this.closed) {
+            const error = new Error('Database provider is closing and cannot accept a transaction.');
+            error.code = 'DATABASE_CLOSING';
+            throw error;
+        }
+        if (this.transactionContext.getStore() === this) {
+            const error = new Error('Nested LocalSqliteProvider transactions are not supported.');
+            error.code = 'NESTED_TRANSACTION_UNSUPPORTED';
+            throw error;
+        }
+
+        const execute = async () => {
+            this.db.exec('BEGIN IMMEDIATE');
+            try {
+                const result = await this.transactionContext.run(this, callback);
+                this.db.exec('COMMIT');
+                return result;
+            } catch (error) {
+                try {
+                    this.db.exec('ROLLBACK');
+                } catch (rollbackError) {
+                    error.rollbackError = rollbackError;
+                }
+                throw error;
+            }
+        };
+
+        const operation = this.transactionTail.then(execute, execute);
+        this.transactionTail = operation.then(() => undefined, () => undefined);
+        return operation;
+    }
+
+    async close() {
+        if (this.closed) return;
+        this.closing = true;
+        await this.transactionTail;
+        if (!this.closed) {
+            this.db.close();
+            this.closed = true;
         }
     }
 
@@ -928,8 +1376,7 @@ export class LocalSqliteProvider extends DatabaseProvider {
     async claimNextJob(workerId = 'local-worker', leaseMs = 60000) {
         const now = Date.now();
         const safeLeaseMs = Math.max(5000, Math.floor(Number(leaseMs) || 60000));
-        this.db.exec('BEGIN IMMEDIATE');
-        try {
+        return this.runSerializedTransaction(async () => {
             const stmt = this.db.prepare(`
                 SELECT * FROM jobs
                 WHERE status IN ('QUEUED', 'RETRYING')
@@ -951,22 +1398,16 @@ export class LocalSqliteProvider extends DatabaseProvider {
                 `);
                 const claimed = updateStmt.run(now, now, workerId, now + safeLeaseMs, job.id, now);
                 if (claimed.changes === 0) {
-                    this.db.exec('COMMIT');
                     return null;
                 }
-                this.db.exec('COMMIT');
                 job.status = 'RUNNING';
                 job.attempts += 1;
                 job.workerId = workerId;
                 job.leaseExpiresAt = now + safeLeaseMs;
                 return job;
             }
-            this.db.exec('COMMIT');
             return null;
-        } catch (e) {
-            this.db.exec('ROLLBACK');
-            throw e;
-        }
+        });
     }
 
     async updateJobStatus(id, status, error = null, attempts = null, workerId = null) {

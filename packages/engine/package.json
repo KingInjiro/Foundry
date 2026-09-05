@@ -26,9 +26,9 @@
   },
   "peerDependencies": {
     "@monaco-editor/react": "^4.7.0",
+    "monaco-editor": "^0.56.0",
     "@xyflow/react": "^12.11.2",
     "file-saver": "^2.0.5",
-    "firebase": "^12.16.0",
     "jszip": "^3.10.1",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
@@ -39,13 +39,13 @@
     "@monaco-editor/react": {
       "optional": true
     },
+    "monaco-editor": {
+      "optional": true
+    },
     "@xyflow/react": {
       "optional": true
     },
     "file-saver": {
-      "optional": true
-    },
-    "firebase": {
       "optional": true
     },
     "jszip": {

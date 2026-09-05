@@ -6,6 +6,9 @@ import { createApp } from './src/platform/backend/server/app.js';
 import { LocalSqliteProvider } from './src/platform/backend/database/LocalSqliteProvider.js';
 import { LocalDiskStorageProvider } from './src/platform/backend/storage/LocalDiskStorageProvider.js';
 import { QuotaConfig } from './src/platform/backend/config/quotas.js';
+import { assertSafeRuntimeMode } from './src/platform/backend/config/runtimeMode.js';
+import { validateProductionConfiguration } from './src/platform/backend/config/productionConfig.js';
+import { createProductionProviders } from './src/platform/backend/config/productionProviders.js';
 
 function getCleanupIntervalMs() {
     const configured = Number(process.env.UPLOAD_CLEANUP_INTERVAL_MS);
@@ -15,12 +18,13 @@ function getCleanupIntervalMs() {
 }
 
 async function startServer() {
+    const runtimeMode = assertSafeRuntimeMode();
+    const productionConfig = validateProductionConfiguration();
     const app = express();
-    const PORT = process.env.PORT || 3000;
+    const PORT = productionConfig.production ? productionConfig.port : (process.env.PORT || 3000);
     let viteServer = null;
 
-    const e2eMode = process.env.E2E_MODE === 'true';
-    const localDevMode = process.env.NODE_ENV !== 'production' && process.env.LOCAL_DEV_MODE === 'true';
+    const { e2eMode, localDevMode, singleHostTestMode } = runtimeMode;
     const HOST = process.env.HOST || (process.env.NODE_ENV === 'production' ? '0.0.0.0' : '127.0.0.1');
 
     // Explicit non-production storage/auth modes.
@@ -35,6 +39,22 @@ async function startServer() {
         process.env.JOB_MODE = 'inline';
         db = new LocalSqliteProvider('.local/platform.db');
         storage = new LocalDiskStorageProvider('.local/storage', '/api/local-storage/upload');
+    } else if (singleHostTestMode) {
+        const dataDirectory = path.resolve(process.env.SINGLE_HOST_TEST_DATA_DIR || '.single-host-e2e');
+        const objectDirectory = path.join(dataDirectory, 'objects');
+        const fs = await import('node:fs');
+        fs.mkdirSync(objectDirectory, { recursive: true });
+        fs.mkdirSync(path.join(dataDirectory, 'backups'), { recursive: true });
+        db = new LocalSqliteProvider(path.join(dataDirectory, 'platform.db'));
+        storage = new LocalDiskStorageProvider(objectDirectory, '/api/storage/upload', {
+            uploadSigningSecret: process.env.LOCAL_STORAGE_SIGNING_SECRET,
+            uploadUrlTtlSeconds: process.env.LOCAL_STORAGE_UPLOAD_URL_TTL_SECONDS,
+            publicOrigin: process.env.PLATFORM_PUBLIC_BASE_URL
+        });
+    } else {
+        const providers = createProductionProviders(productionConfig);
+        db = providers.database;
+        storage = providers.storage;
     }
 
     if (e2eMode || localDevMode) {
@@ -48,19 +68,43 @@ async function startServer() {
 
     // Destructive reset remains test-only and is never exposed by local development mode.
     if (e2eMode) {
+        app.get('/api/test-delay', async (req, res) => {
+            const delayMs = Math.max(0, Math.min(Number(req.query.ms) || 0, 30_000));
+            await new Promise(resolve => setTimeout(resolve, delayMs));
+            if (!res.destroyed) res.json({ success: true, data: [] });
+        });
+
+        app.post('/api/test-users/:uid/role', async (req, res) => {
+            const role = typeof req.query.role === 'string' ? req.query.role.trim().toUpperCase() : '';
+            if (!['ADMIN', 'MODERATOR', 'DEVELOPER'].includes(role)) {
+                return res.status(400).json({ success: false, error: { code: 'INVALID_TEST_ROLE', message: 'Unsupported test role.' } });
+            }
+            const result = await db.provisionUserRole({
+                uid: req.params.uid,
+                role,
+                email: `${req.params.uid}@foundry.test`,
+                displayName: `${role} QA`
+            });
+            res.json({ success: true, data: result.user });
+        });
+
         app.post('/api/test-db/reset', async (req, res) => {
             if (e2eMode) {
                 db.db.exec(`
                     DELETE FROM jobs;
+                    DELETE FROM rate_limit_buckets;
                     DELETE FROM upload_sessions;
-                    DELETE FROM game_versions;
-                    DELETE FROM games;
-                    DELETE FROM users;
+                    DELETE FROM moderation_actions;
+                    DELETE FROM game_reports;
+                    DELETE FROM editor_projects;
                     DELETE FROM user_library;
                     DELETE FROM game_ratings;
                     DELETE FROM developer_follows;
                     DELETE FROM discovery_events;
                     DELETE FROM continue_playing_dismissals;
+                    DELETE FROM game_versions;
+                    DELETE FROM games;
+                    DELETE FROM users;
                 `);
                 // Also clean storage directory
                 const fs = await import('fs');
@@ -88,24 +132,25 @@ async function startServer() {
     }
 
     // API routes FIRST
-    const backendApp = createApp(db, storage);
+    const backendApp = createApp(db, storage, undefined, { runtimeConfig: productionConfig });
     app.use(backendApp);
     const logger = backendApp.locals.logger;
 
-    if (process.env.NODE_ENV === 'production' && process.env.ALLOW_UNREADY_STARTUP !== 'true') {
-        const databaseReady = await backendApp.locals.database.ping();
-        const storageReady = typeof backendApp.locals.storage.ping === 'function'
-            ? await backendApp.locals.storage.ping()
-            : Boolean(backendApp.locals.storage.isConfigured);
-        if (!databaseReady || !storageReady) {
-            throw new Error('Production dependencies are not ready. Set ALLOW_UNREADY_STARTUP=true only for controlled diagnostics.');
+    if (process.env.NODE_ENV === 'production') {
+        const readiness = await backendApp.locals.checkReadiness();
+        if (!readiness.ready) {
+            throw new Error(`Production dependencies are not ready: ${JSON.stringify(readiness.checks)}`);
         }
     }
 
+    let cleanupSchedulingStopped = false;
+    let activeCleanupScheduling = Promise.resolve();
     const runUploadCleanup = () => {
-        void backendApp.locals.uploadCleanupService.enqueueCleanupJobs().catch(error => {
-            logger.error('upload_cleanup_scheduling_failed', { error });
-        });
+        if (cleanupSchedulingStopped) return activeCleanupScheduling;
+        activeCleanupScheduling = activeCleanupScheduling
+            .then(() => backendApp.locals.uploadCleanupService.enqueueCleanupJobs())
+            .catch(error => logger.error('upload_cleanup_scheduling_failed', { error }));
+        return activeCleanupScheduling;
     };
     runUploadCleanup();
     const cleanupInterval = setInterval(runUploadCleanup, getCleanupIntervalMs());
@@ -119,7 +164,7 @@ async function startServer() {
         });
         app.use(viteServer.middlewares);
     } else {
-        const distPath = path.join(process.cwd(), 'dist');
+        const distPath = path.join(process.cwd(), 'dist', 'client');
         app.use(express.static(distPath));
         app.get('*', (req, res) => {
             res.sendFile(path.join(distPath, 'index.html'));
@@ -132,23 +177,47 @@ async function startServer() {
     });
 
     let shuttingDown = false;
-    const shutdown = signal => {
+    const shutdown = async signal => {
         if (shuttingDown) return;
         shuttingDown = true;
+        cleanupSchedulingStopped = true;
         clearInterval(cleanupInterval);
-        backendApp.locals.jobQueue?.stop?.();
-        server.close(async () => {
+        logger.info('server_stopping', { signal });
+
+        // server.close() immediately stops accepting new connections. The job
+        // queue is then put into drain mode before the database is closed.
+        const httpClosed = new Promise((resolve, reject) => {
+            server.close(error => error ? reject(error) : resolve());
+            server.closeIdleConnections?.();
+        });
+        const graceMs = productionConfig.shutdownGraceMs || 30_000;
+        const graceTimer = setTimeout(() => {
+            logger.error('shutdown_grace_exceeded', { signal, graceMs, recovery: 'Active jobs remain durable and are reclaimable after their lease expires.' });
+            server.closeAllConnections?.();
+            process.exitCode = 1;
+            setTimeout(() => process.exit(1), 250);
+        }, graceMs);
+        graceTimer.unref?.();
+
+        try {
+            await activeCleanupScheduling;
+            await Promise.all([httpClosed, Promise.resolve(backendApp.locals.jobQueue?.stop?.())]);
             await viteServer?.close();
-            try {
+            if (typeof backendApp.locals.database?.close === 'function') {
+                await backendApp.locals.database.close();
+            } else {
                 backendApp.locals.database?.db?.close?.();
-            } catch (error) {
-                logger.error('database_shutdown_failed', { error });
             }
             logger.info('server_stopped', { signal });
-        });
+        } catch (error) {
+            logger.error('graceful_shutdown_failed', { signal, error });
+            process.exitCode = 1;
+        } finally {
+            clearTimeout(graceTimer);
+        }
     };
-    process.once('SIGINT', () => shutdown('SIGINT'));
-    process.once('SIGTERM', () => shutdown('SIGTERM'));
+    process.once('SIGINT', () => { void shutdown('SIGINT'); });
+    process.once('SIGTERM', () => { void shutdown('SIGTERM'); });
 }
 
 startServer().catch(error => {

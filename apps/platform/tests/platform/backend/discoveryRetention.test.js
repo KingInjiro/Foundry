@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { afterEach, describe, it, expect, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import crypto from 'crypto';
 import { createApp } from '../../../src/platform/backend/server/app.js';
@@ -16,6 +16,12 @@ describe('Discovery retention loop', () => {
         db = new LocalSqliteProvider(':memory:');
         app = createApp(db, { isConfigured: true });
         await db.createUser({ uid: developerUid, email: 'developer@foundry.test', displayName: 'Test Developer', avatarUrl: '', role: 'DEVELOPER', createdAt: Date.now(), updatedAt: Date.now() });
+    });
+
+    afterEach(async () => {
+        vi.restoreAllMocks();
+        await app?.locals?.jobQueue?.stop?.();
+        await db.close();
     });
 
     async function createPublishedGame(title = 'Playable Game') {
@@ -155,5 +161,29 @@ describe('Discovery retention loop', () => {
 
         const badEvent = await request(app).post('/api/discovery/events').send({ sessionId: 'x', gameId, eventType: 'arbitrary_event' });
         expect(badEvent.status).toBe(400);
+    });
+
+    it('uses bounded batch catalog queries for multi-game discovery and retention responses', async () => {
+        const gameIds = await Promise.all(Array.from({ length: 8 }, (_, index) => createPublishedGame(`Batch ${index}`)));
+        for (const gameId of gameIds.slice(0, 4)) {
+            await db.addToLibrary(playerUid, gameId);
+            await db.recordDiscoveryEvent({ id: crypto.randomUUID(), sessionId: `batch-${gameId}`, userUid: playerUid, gameId, eventType: 'game_ready', durationMs: 0, createdAt: Date.now() });
+        }
+
+        const perGameRating = vi.spyOn(db, 'getGameRatingSummary');
+        const perGameEngagement = vi.spyOn(db, 'getGameDiscoveryStats');
+        const perGameLookup = vi.spyOn(db, 'getGame');
+        const batchRows = vi.spyOn(db, 'getCatalogRowsByGameIds');
+
+        await request(app).get('/api/discovery/trending?limit=8');
+        await request(app).get('/api/discovery/recommendations?limit=8').set('x-dev-uid', playerUid);
+        await request(app).get('/api/library').set('x-dev-uid', playerUid);
+        await request(app).get('/api/continue-playing').set('x-dev-uid', playerUid);
+
+        expect(perGameRating).not.toHaveBeenCalled();
+        expect(perGameEngagement).not.toHaveBeenCalled();
+        expect(perGameLookup).not.toHaveBeenCalled();
+        expect(batchRows).toHaveBeenCalledTimes(5);
+        expect(batchRows.mock.calls.every(([ids]) => ids.length <= 100)).toBe(true);
     });
 });

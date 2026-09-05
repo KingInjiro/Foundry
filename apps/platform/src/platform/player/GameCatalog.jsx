@@ -103,13 +103,23 @@ export function GameCatalog() {
 
     const query = searchParams.get('q') || '';
     const selectedTag = searchParams.get('tag') || '';
-    const sort = normalizeCatalogSort(searchParams.get('sort') || 'featured');
+    const rawSort = searchParams.get('sort') || '';
+    const sort = normalizeCatalogSort(rawSort || 'featured');
     const [debouncedQuery, setDebouncedQuery] = useState(query);
 
     useEffect(() => {
         const timeout = window.setTimeout(() => setDebouncedQuery(query.trim()), 250);
         return () => window.clearTimeout(timeout);
     }, [query]);
+
+    useEffect(() => {
+        if (!rawSort || rawSort === sort) return;
+        setSearchParams(current => {
+            const next = new URLSearchParams(current);
+            next.delete('sort');
+            return next;
+        }, { replace: true });
+    }, [rawSort, sort, setSearchParams]);
 
     const catalogEndpoint = cursor => {
         const params = new URLSearchParams({ limit: '24' });

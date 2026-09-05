@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { db, doc, setDoc, getDoc } from './lib/firebase.js';
 import { motion } from 'motion/react';
 import { Cloud, CloudDownload, GripHorizontal } from 'lucide-react';
 import JSZip from 'jszip';
@@ -7,7 +6,40 @@ import { saveAs } from 'file-saver';
 
 
 
-import Editor from '@monaco-editor/react';
+import Editor, { loader as monacoLoader } from '@monaco-editor/react';
+// Import only the editor surface and the languages/features Foundry exposes.
+// The Monaco package root also pulls its full language/LSP distribution into
+// the SPA, which can exhaust the default Node heap during a production build.
+import * as monaco from 'monaco-editor/editor/editor.api';
+import * as monacoTypeScript from 'monaco-editor/language/typescript/monaco.contribution';
+import 'monaco-editor/language/json/monaco.contribution';
+import 'monaco-editor/language/css/monaco.contribution';
+import 'monaco-editor/language/html/monaco.contribution';
+import 'monaco-editor/languages/definitions/javascript/register';
+import 'monaco-editor/languages/definitions/css/register';
+import 'monaco-editor/languages/definitions/html/register';
+import 'monaco-editor/editor/contrib/bracketMatching/browser/bracketMatching';
+import 'monaco-editor/editor/contrib/clipboard/browser/clipboard';
+import 'monaco-editor/editor/contrib/comment/browser/comment';
+import 'monaco-editor/editor/contrib/contextmenu/browser/contextmenu';
+import 'monaco-editor/editor/contrib/find/browser/findController';
+import 'monaco-editor/editor/contrib/folding/browser/folding';
+import 'monaco-editor/editor/contrib/format/browser/formatActions';
+import 'monaco-editor/editor/contrib/hover/browser/hoverContribution';
+import 'monaco-editor/editor/contrib/indentation/browser/indentation';
+import 'monaco-editor/editor/contrib/linesOperations/browser/linesOperations';
+import 'monaco-editor/editor/contrib/multicursor/browser/multicursor';
+import 'monaco-editor/editor/contrib/parameterHints/browser/parameterHints';
+import 'monaco-editor/editor/contrib/snippet/browser/snippetController2';
+import 'monaco-editor/editor/contrib/suggest/browser/suggestController';
+import 'monaco-editor/editor/contrib/tokenization/browser/tokenization';
+import 'monaco-editor/editor/contrib/wordHighlighter/browser/wordHighlighter';
+import 'monaco-editor/editor/contrib/wordOperations/browser/wordOperations';
+import editorWorker from 'monaco-editor/editor/editor.worker?worker';
+import jsonWorker from 'monaco-editor/language/json/json.worker?worker';
+import cssWorker from 'monaco-editor/language/css/css.worker?worker';
+import htmlWorker from 'monaco-editor/language/html/html.worker?worker';
+import typescriptWorker from 'monaco-editor/language/typescript/ts.worker?worker';
 import { Rocket, Play, Pause, RotateCcw, Download, FolderOpen, Save, Activity, File, Plus, X, FileJson, ChevronDown, Image as ImageIcon, Music, Upload, Wand2, Github, PanelLeft, PanelRight, Code, Settings } from 'lucide-react';
 
 
@@ -34,6 +66,22 @@ import { EXAMPLES } from './examples.js';
 import { ProjectManager } from './components/ProjectManager.jsx';
 
 import { foundryTypes } from './monacoTypes.js';
+import { archiveToGitHubFiles, buildEditorExportArchive } from './lib/exportProject.js';
+import { pushFilesToGitHub } from './lib/githubExport.js';
+
+if (typeof self !== 'undefined') {
+    self.MonacoEnvironment = {
+        getWorker(_moduleId, label) {
+            if (label === 'json') return new jsonWorker();
+            if (label === 'css' || label === 'scss' || label === 'less') return new cssWorker();
+            if (label === 'html' || label === 'handlebars' || label === 'razor') return new htmlWorker();
+            if (label === 'typescript' || label === 'javascript') return new typescriptWorker();
+            return new editorWorker();
+        }
+    };
+}
+monacoLoader.config({ monaco });
+
 // Expose core classes so user code can access them
 const FoundryAPI = Foundry;
 
@@ -65,9 +113,21 @@ const getMimeType = (filename) => {
 
 
 
-const engineModules = import.meta.glob(['../engine/audio/**/*.js', '../engine/camera/**/*.js', '../engine/core/**/*.js', './**/*.js', '../engine/entity/**/*.js', '../engine/graphics/**/*.js', '../engine/input/**/*.js', '../engine/math/**/*.js', '../engine/physics/**/*.js', '../engine/renderer/**/*.js', '../engine/serialization/**/*.js', '../engine/simulation/**/*.js', '../engine/simulations/**/*.js', '../engine/ui/**/*.js', '../engine/world/**/*.js', '../engine/Foundry.js', '../engine/index.js'], { query: '?raw', import: 'default', eager: true });
+let engineExportSourcesPromise = null;
 
-export default function App() {
+async function loadEngineExportSources() {
+    if (!engineExportSourcesPromise) {
+        engineExportSourcesPromise = import('./engineExportSources.js')
+            .then(module => module.engineExportSources)
+            .catch(error => {
+                engineExportSourcesPromise = null;
+                throw error;
+            });
+    }
+    return engineExportSourcesPromise;
+}
+
+export default function App({ cloudProjectAdapter = null, hostIntegration = null }) {
     useEffect(() => {
         if (!localStorage.getItem('v154_force_clear_cuberunner')) {
             localStorage.removeItem('foundry_files');
@@ -100,7 +160,7 @@ export default function App() {
     const [engineStats, setEngineStats] = useState(null);
     const [crashData, setCrashData] = useState(null);
     const [showResourceMonitor, setShowResourceMonitor] = useState(true);
-    const [syncId, setSyncId] = useState('');
+    const [syncId, setSyncId] = useState(() => cloudProjectAdapter?.initialProjectId || '');
     const [isSyncing, setIsSyncing] = useState(false);
     const engineRef = useRef(null);
     const editorRef = useRef(null);
@@ -118,12 +178,33 @@ export default function App() {
     const [rightPanelOpen, setRightPanelOpen] = useState(window.innerWidth > 1024);
     const [showGithubModal, setShowGithubModal] = useState(false);
     const [showExportModal, setShowExportModal] = useState(false);
-    const [githubToken, setGithubToken] = useState(localStorage.getItem('foundry_gh_token') || '');
+    const [githubToken, setGithubToken] = useState('');
     const [githubRepo, setGithubRepo] = useState('foundry-game');
     const [githubStatus, setGithubStatus] = useState('');
+    const [isExporting, setIsExporting] = useState(false);
+    const [exportError, setExportError] = useState('');
+    const [isGithubExporting, setIsGithubExporting] = useState(false);
     
     const [isPaused, setIsPaused] = useState(false);
     const [hasAutosave, setHasAutosave] = useState(() => !!localStorage.getItem('foundry_autosaved_scene'));
+
+    const closeGithubModal = () => {
+        if (isGithubExporting) return;
+        setShowGithubModal(false);
+        setGithubToken('');
+        setGithubStatus('');
+    };
+
+    useEffect(() => {
+        if (!showExportModal && !showGithubModal) return undefined;
+        const onKeyDown = event => {
+            if (event.key !== 'Escape') return;
+            if (showExportModal && !isExporting) setShowExportModal(false);
+            if (showGithubModal && !isGithubExporting) closeGithubModal();
+        };
+        window.addEventListener('keydown', onKeyDown);
+        return () => window.removeEventListener('keydown', onKeyDown);
+    }, [showExportModal, showGithubModal, isExporting, isGithubExporting]);
 
 
 
@@ -149,15 +230,16 @@ export default function App() {
     };
 
     const handleEditorWillMount = (monaco) => {
-        monaco.languages.typescript.javascriptDefaults.setDiagnosticsOptions({
+        const typeScript = monacoTypeScript;
+        typeScript.javascriptDefaults.setDiagnosticsOptions({
             noSemanticValidation: true,
             noSyntaxValidation: false
         });
-        monaco.languages.typescript.javascriptDefaults.setCompilerOptions({
-            target: monaco.languages.typescript.ScriptTarget.ES2020,
+        typeScript.javascriptDefaults.setCompilerOptions({
+            target: typeScript.ScriptTarget.ES2020,
             allowNonTsExtensions: true
         });
-        monaco.languages.typescript.javascriptDefaults.addExtraLib(foundryTypes, 'ts:filename/foundry.d.ts');
+        typeScript.javascriptDefaults.addExtraLib(foundryTypes, 'ts:filename/foundry.d.ts');
 
         monaco.languages.registerCompletionItemProvider('javascript', {
             provideCompletionItems: (model, position) => {
@@ -276,497 +358,122 @@ export default function App() {
 
     
     const saveToCloud = async () => {
+        if (!cloudProjectAdapter?.save) {
+            alert('Cloud save is unavailable in this host. Your local editor autosave is still active.');
+            return;
+        }
         setIsSyncing(true);
         try {
-            const id = syncId || Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
-            await setDoc(doc(db, 'projects', id), { files });
-            setSyncId(id);
-            window.history.replaceState({}, '', '?id=' + id);
-            alert('Project saved! Share this URL to load the project:\n' + window.location.href);
+            const saved = await cloudProjectAdapter.save({ id: syncId || null, files });
+            if (!saved?.id) throw new Error('Cloud save did not return a project ID.');
+            setSyncId(saved.id);
+            window.history.replaceState({}, '', `${window.location.pathname}?id=${encodeURIComponent(saved.id)}`);
+            alert('Project saved to your private Foundry account.');
         } catch (e) {
             console.error('Save failed', e);
-            alert('Failed to save to cloud.');
+            alert(e?.message || 'Failed to save to cloud.');
         }
         setIsSyncing(false);
     };
 
     const loadFromCloud = async (id) => {
+        if (!cloudProjectAdapter?.load) {
+            alert('Cloud load is unavailable in this host.');
+            return;
+        }
         setIsSyncing(true);
         try {
-            const snap = await getDoc(doc(db, 'projects', id));
-            if (snap.exists()) {
-                const data = snap.data();
-                setFiles(data.files);
-                setActiveFileId(data.files[0].id);
-                setSyncId(id);
-            } else {
-                alert('Project not found in cloud.');
+            const project = await cloudProjectAdapter.load(id);
+            if (!Array.isArray(project?.files) || project.files.length === 0 || project.files.some(file => !file || typeof file.id !== 'string' || typeof file.name !== 'string' || typeof file.code !== 'string')) {
+                throw new Error('The stored editor project is malformed and was not loaded.');
             }
+            setFiles(project.files);
+            setActiveFileId(project.files[0].id);
+            setSyncId(project.id || id);
         } catch (e) {
             console.error('Load failed', e);
-            alert('Failed to load from cloud.');
+            alert(e?.message || 'Failed to load from cloud.');
         }
         setIsSyncing(false);
+    };
+
+    const sendToHost = async () => {
+        if (!hostIntegration?.onSend || isSyncing) return;
+        const editorPath = window.location.pathname;
+        setIsSyncing(true);
+        try {
+            const result = await hostIntegration.onSend({ editorProjectId: syncId || null, files });
+            if (result?.editorProjectId) {
+                setSyncId(result.editorProjectId);
+                // The host may navigate after a successful handoff. Never
+                // append editor identity state to that destination route.
+                if (window.location.pathname === editorPath) {
+                    window.history.replaceState({}, '', `${editorPath}?id=${encodeURIComponent(result.editorProjectId)}`);
+                }
+            }
+        } catch (error) {
+            console.error('Host handoff failed', error);
+            alert(error?.message || 'Could not send this project to the host platform.');
+        } finally {
+            setIsSyncing(false);
+        }
     };
 
     useEffect(() => {
         const urlParams = new URLSearchParams(window.location.search);
         const id = urlParams.get('id');
-        if (id) {
+        if (id && cloudProjectAdapter?.load) {
             loadFromCloud(id);
         }
-    }, []);
+    }, [cloudProjectAdapter]);
 
-        const handleExport = async (mode) => {
+    const handleExport = async (mode) => {
+        if (isExporting) return;
+        setIsExporting(true);
+        setExportError('');
         try {
-            const zip = new JSZip();
-            
-            // 1. Engine files (for all modes)
-            for (const [path, content] of Object.entries(engineModules)) {
-                const cleanPath = path.replace('./', 'engine/');
-                zip.file(cleanPath, content);
-            }
-            
-            let indexHtml = "";
-            
-            if (mode === 'standalone' || mode === 'html') {
-                let combinedCode = "";
-                const sortedFiles = [...files].sort((a, b) => {
-                    if (a.name.toLowerCase() === 'main.js') return 1;
-                    if (b.name.toLowerCase() === 'main.js') return -1;
-                    return 0;
-                });
-                combinedCode = sortedFiles.filter(f => f.name.endsWith('.js')).map(f => f.code).join('\n\n');
-                const cleanedCode = combinedCode.replace(/(?:const|let|var)\s*\{[^}]*\}\s*=\s*(?:window\.)?Foundry\s*;/g, '').replace(/import\s+[\s\S]*?\s+from\s+['"].*?['"];?/g, '');
-                
-                const assets = {};
-                if (mode === 'standalone') {
-                    files.forEach(f => {
-                        const type = getFileType(f.name);
-                        if (type === 'image' || type === 'audio') {
-                            assets[f.name] = `data:${getMimeType(f.name)};base64,${f.code}`;
-                        } else if (type !== 'text' && !f.name.endsWith('.js')) {
-                            assets[f.name] = f.code;
-                        }
-                    });
-                } else {
-                    const assetsFolder = zip.folder("assets");
-                    files.forEach(f => {
-                        const type = getFileType(f.name);
-                        if (type === 'image' || type === 'audio') {
-                            if (f.code && f.code.startsWith('data:')) {
-                                assetsFolder.file(f.name, f.code.split(',')[1], {base64: true});
-                            } else {
-                                assetsFolder.file(f.name, f.code, {base64: true});
-                            }
-                            assets[f.name] = 'assets/' + f.name;
-                        }
-                    });
-                    
-                    zip.file('game.js', "const { Simulation, Entity, Component, ObjectPool, Mathf, Vector2, Sprite, Animator, TextRenderer, ShapeRenderer, Tilemap, ParticleEmitter, PhysicsBody, AudioManager, TrailRenderer, LightSource, Parallax, Lifespan, CameraFollow, NavAgent, InputController, Scene, FSM, State, StateMachine, raycast, Flash, PhysicsConstraint, SoftBody, Health, DamageArea, TriggerArea, JuiceSystem, TweenManager, Easing, MeshRenderer, Light3D, ModelRenderer, PhysicsBody3D } = Foundry;\n" + cleanedCode + "\n\nwindow.FoundryGame = typeof Main !== 'undefined' ? Main : (typeof CustomGame !== 'undefined' ? CustomGame : null);");
-                }
-                
-                indexHtml = `<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>Foundry Game</title>
-    <style>
-        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
-        #game-container { width: 100%; height: 100%; }
-    </style>
-    <script type="importmap">
-        { "imports": { "matter-js": "https://esm.sh/matter-js@0.19.0" } }
-    </script>
-</head>
-<body>
-    <div id="game-container"></div>
-    <script type="module">
-        import { Foundry } from '../engine/Foundry.js';
-        window.Foundry = Foundry;
-        const assets = ${JSON.stringify(assets)};
-        const engine = new Foundry.Engine({ headless: false, width: window.innerWidth, height: window.innerHeight });
-        document.getElementById('game-container').appendChild(engine.canvas.element);
-        window.addEventListener('resize', () => { engine.resize(window.innerWidth, window.innerHeight); });
-        
-        for (const [name, url] of Object.entries(assets)) {
-            if (url.startsWith('data:image') || name.endsWith('.png') || name.endsWith('.jpg')) { engine.assets.loadImage(name, url); }
-            else { engine.assets.loadSound(name, url); }
-        }
-        
-        ${mode === 'standalone' ? `
-        const createSimClass = new Function('Foundry', 'assets', "const { Simulation, Entity, Component, ObjectPool, Mathf, Vector2, Sprite, Animator, TextRenderer, ShapeRenderer, Tilemap, ParticleEmitter, PhysicsBody, AudioManager, TrailRenderer, LightSource, Parallax, Lifespan, CameraFollow, NavAgent, InputController, Scene, FSM, State, StateMachine, raycast, Flash, PhysicsConstraint, SoftBody, Health, DamageArea, TriggerArea, JuiceSystem, TweenManager, Easing, MeshRenderer, Light3D, ModelRenderer, PhysicsBody3D } = Foundry;\\n" + \`${cleanedCode}\` + "\\nreturn typeof Main !== 'undefined' ? Main : (typeof CustomGame !== 'undefined' ? CustomGame : null);");
-        const SimClass = createSimClass(Foundry, assets);
-        if (SimClass) {
-            const simInstance = new SimClass(engine);
-            engine.simulations.register('Main', simInstance);
-            engine.simulations.setActive('Main');
-            engine.start({ splash: false });
-        }` : `
-        const script = document.createElement('script');
-        script.src = 'game.js';
-        script.onload = () => {
-            const SimClass = window.FoundryGame;
-            if (SimClass) {
-                const simInstance = new SimClass(engine);
-                engine.simulations.register('Main', simInstance);
-                engine.simulations.setActive('Main');
-                engine.start({ splash: false });
-            }
-        };
-        document.body.appendChild(script);
-        `}
-    </script>
-</body>
-</html>`;} else {
-                // PROJECT / TAURI MODE: raw source files
-                const srcFolder = zip.folder("src");
-                const sortedFiles = [...files].sort((a, b) => {
-                    if (a.name.toLowerCase() === 'main.js') return 1;
-                    if (b.name.toLowerCase() === 'main.js') return -1;
-                    return 0;
-                });
-                
-                const fileNames = [];
-                sortedFiles.forEach(f => {
-                    if (f.name.endsWith('.js')) {
-                        srcFolder.file(f.name, f.code);
-                        fileNames.push('/src/' + f.name);
-                    }
-                });
-                
-                // Assets in public/assets
-                const assetsFolder = zip.folder("public").folder("assets");
-                const assetsManifest = {};
-                files.forEach(f => {
-                    const type = getFileType(f.name);
-                    if (type === 'image' || type === 'audio') {
-                        if (f.code && f.code.startsWith('data:')) {
-                            assetsFolder.file(f.name, f.code.split(',')[1], {base64: true});
-                        } else {
-                            assetsFolder.file(f.name, f.code, {base64: true});
-                        }
-                        assetsManifest[f.name] = '/assets/' + f.name;
-                    }
-                });
-                
-                indexHtml = `<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>Foundry Game</title>
-    <style>
-        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
-        #game-container { width: 100%; height: 100%; }
-    </style>
-    <script type="importmap">
-        { "imports": { "matter-js": "https://esm.sh/matter-js@0.19.0" } }
-    </script>
-</head>
-<body>
-    <div id="game-container"></div>
-    <script type="module">
-        import { Foundry } from '../engine/Foundry.js';
-        
-        async function boot() {
-            const assetsManifest = ${JSON.stringify(assetsManifest)};
-            const scriptFiles = ${JSON.stringify(fileNames)};
-            
-            const engine = new Foundry.Engine({ headless: false, width: window.innerWidth, height: window.innerHeight });
-            document.getElementById('game-container').appendChild(engine.canvas.element);
-            window.addEventListener('resize', () => { engine.resize(window.innerWidth, window.innerHeight); });
-            
-            let combinedCode = "";
-            for (const file of scriptFiles) {
-                const res = await fetch(file);
-                const text = await res.text();
-                combinedCode += text + "\n\n";
-            }
-            const cleanedCode = combinedCode.replace(/(?:const|let|var)\s*\{[^}]*\}\s*=\s*(?:window\.)?Foundry\s*;/g, '').replace(/import\s+[\s\S]*?\s+from\s+['"].*?['"];?/g, '');
-            
-            for (const [name, url] of Object.entries(assetsManifest)) {
-                if (name.endsWith('.png') || name.endsWith('.jpg')) { engine.assets.loadImage(name, url); }
-                else { engine.assets.loadSound(name, url); }
-            }
-            
-            const createSimClass = new Function('Foundry', 'assets', "const { Simulation, Entity, Component, ObjectPool, Mathf, Vector2, Sprite, Animator, TextRenderer, ShapeRenderer, Tilemap, ParticleEmitter, PhysicsBody, AudioManager, TrailRenderer, LightSource, Parallax, Lifespan, CameraFollow, NavAgent, InputController, Scene, FSM, State, StateMachine, raycast, Flash, PhysicsConstraint, SoftBody, Health, DamageArea, TriggerArea, JuiceSystem, TweenManager, Easing, MeshRenderer, Light3D, ModelRenderer, PhysicsBody3D } = Foundry;\\n" + cleanedCode + "\\nreturn typeof Main !== 'undefined' ? Main : (typeof CustomGame !== 'undefined' ? CustomGame : null);");
-            const SimClass = createSimClass(Foundry, assetsManifest);
-            
-            if (SimClass) {
-                const simInstance = new SimClass(engine);
-                engine.simulations.register('Main', simInstance);
-                engine.simulations.setActive('Main');
-                engine.start({ splash: false });
-            }
-        }
-        boot();
-    </script>
-</body>
-</html>`;
-
-                zip.file('package.json', JSON.stringify({
-                    name: "foundry-game",
-                    version: "1.0.0",
-                    scripts: { 
-                        "dev": "vite", 
-                        "build": "vite build",
-                        "tauri": "tauri"
-                    },
-                    devDependencies: { 
-                        "vite": "^5.0.0",
-                        "@tauri-apps/cli": "^1.5.0"
-                    }
-                }, null, 2));
-                
-                zip.file('README.md', `# Foundry Game\n\nTo run this game locally:\n\n1. Install Node.js.\n2. Run \`npm install\`\n3. Run \`npm run dev\` to start a local development server.\n\nTo build a native executable (Tauri):\n1. Install Rust and native build tools.\n2. Run \`npm run tauri build\`\n`);
-            }
-            
-            zip.file('index.html', indexHtml);
-            
-            if (mode === 'tauri') {
-                const srcTauri = zip.folder('src-tauri');
-                srcTauri.file('tauri.conf.json', JSON.stringify({
-                  build: { beforeBuildCommand: "npm run build", beforeDevCommand: "npm run dev", devPath: "http://localhost:5173", distDir: "../dist" },
-                  package: { productName: "Foundry Game", version: "1.0.0" },
-                  tauri: {
-                    allowlist: { all: false },
-                    bundle: {
-                      active: true, category: "Game", copyright: "",
-                      deb: { depends: [] }, externalBin: [],
-                      icon: [],
-                      identifier: "com.foundry.game", longDescription: "",
-                      macOS: { entitlements: null, exceptionDomain: "", frameworks: [], providerShortName: null, signingIdentity: null },
-                      resources: [], shortDescription: "", targets: "all",
-                      windows: { certificateThumbprint: null, digestAlgorithm: "sha256", timestampUrl: "" }
-                    },
-                    security: { csp: null },
-                    windows: [ { fullscreen: false, height: 600, resizable: true, title: "Foundry Game", width: 800 } ]
-                  }
-                }, null, 2));
-                
-                srcTauri.file('Cargo.toml', `[package]\nname = "foundry-game"\nversion = "1.0.0"\ndescription = "A Foundry Engine Game"\nauthors = ["you"]\nedition = "2021"\n\n[build-dependencies]\ntauri-build = { version = "1.5.0", features = [] }\n\n[dependencies]\ntauri = { version = "1.5.0", features = [] }\nserde = { version = "1.0", features = ["derive"] }\nserde_json = "1.0"`);
-                srcTauri.file('build.rs', `fn main() {\n  tauri_build::build()\n}`);
-                
-                const srcTauriSrc = srcTauri.folder('src');
-                srcTauriSrc.file('main.rs', `#![cfg_attr(\n  all(not(debug_assertions), target_os = "windows"),\n  windows_subsystem = "windows"\n)]\n\nfn main() {\n  tauri::Builder::default()\n    .run(tauri::generate_context!())\n    .expect("error while running tauri application");\n}`);
-                
-                const ghAction = `name: Build Tauri App\non:\n  push:\n    branches: [ main, master ]\n  workflow_dispatch:\njobs:\n  build:\n    strategy:\n      fail-fast: false\n      matrix:\n        platform: [macos-latest, ubuntu-22.04, windows-latest]\n    runs-on: \$\{{ matrix.platform }}\n    steps:\n      - uses: actions/checkout@v4\n      - name: setup node\n        uses: actions/setup-node@v4\n        with:\n          node-version: 20\n      - name: install Rust stable\n        uses: dtolnay/rust-toolchain@stable\n      - name: install dependencies (ubuntu only)\n        if: matrix.platform == 'ubuntu-22.04'\n        run: |\n          sudo apt-get update\n          sudo apt-get install -y libwebkit2gtk-4.0-dev build-essential curl wget file libssl-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev\n      - name: install frontend dependencies\n        run: npm install\n      - uses: tauri-apps/tauri-action@v0\n        env:\n          GITHUB_TOKEN: \$\{{ secrets.GITHUB_TOKEN }}\n        with:\n          tagName: v\$\{{ github.run_number }}\n          releaseName: 'Foundry Game Release v\$\{{ github.run_number }}'\n          releaseBody: 'Automated release built with Tauri Action.'\n          releaseDraft: false\n          prerelease: false`;
-                zip.file('.github/workflows/build.yml', ghAction);
-            }
-            
-            const blob = await zip.generateAsync({ type: 'blob' });
-            saveAs(blob, mode === 'tauri' ? 'foundry-tauri.zip' : (mode === 'project' ? 'foundry-project.zip' : 'foundry-html.zip'));
+            const engineModules = await loadEngineExportSources();
+            const zip = await buildEditorExportArchive({ mode, files, engineModules });
+            const blob = await zip.generateAsync({ type: 'blob', mimeType: 'application/zip' });
+            const archiveNames = {
+                standalone: 'foundry-web-bundle.zip',
+                html: 'foundry-html.zip',
+                project: 'foundry-project.zip',
+                tauri: 'foundry-tauri.zip'
+            };
+            saveAs(blob, archiveNames[mode] || 'foundry-export.zip');
             setShowExportModal(false);
-            
-        } catch (e) {
-            console.error("Export failed", e);
-            setErrorMsg("Export failed: " + e.message);
+        } catch (error) {
+            console.error('Export failed', error);
+            setExportError('Project export could not be prepared. Reload the Editor and try again.');
+        } finally {
+            setIsExporting(false);
         }
     };
-
     const handleGithubExport = async () => {
-        if (!githubToken || !githubRepo) return;
-        localStorage.setItem('foundry_gh_token', githubToken);
-        setGithubStatus('Creating repository...');
+        if (isGithubExporting || !githubToken.trim() || !githubRepo.trim()) return;
+        setIsGithubExporting(true);
+        setGithubStatus('Preparing canonical export files…');
         try {
-            // Create repo
-            const repoRes = await fetch('https://api.github.com/user/repos', {
-                method: 'POST',
-                headers: { 'Authorization': `token ${githubToken}`, 'Accept': 'application/vnd.github.v3+json' },
-                body: JSON.stringify({ name: githubRepo, private: false, auto_init: true })
+            const engineModules = await loadEngineExportSources();
+            const archive = await buildEditorExportArchive({ mode: 'tauri', files, engineModules });
+            const githubFiles = await archiveToGitHubFiles(archive);
+            const result = await pushFilesToGitHub({
+                token: githubToken,
+                repository: githubRepo,
+                files: githubFiles,
+                onProgress: setGithubStatus
             });
-            let owner;
-            if (repoRes.ok) {
-                const repoData = await repoRes.json();
-                owner = repoData.owner.login;
-            } else if (repoRes.status === 422) {
-                // Repo might already exist, try to get user info to proceed
-                const userRes = await fetch('https://api.github.com/user', {
-                    headers: { 'Authorization': `token ${githubToken}`, 'Accept': 'application/vnd.github.v3+json' }
-                });
-                const userData = await userRes.json();
-                owner = userData.login;
-                setGithubStatus('Using existing repository...');
-            } else {
-                throw new Error("Failed to create repo: " + repoRes.statusText);
-            }
-            
-            setGithubStatus('Uploading files...');
-            
-            // Gather files
-            const ghFiles = [];
-            
-            // Add engine files
-            for (const [path, fContent] of Object.entries(engineModules)) {
-                const cleanPath = path.replace('./', 'engine/');
-                ghFiles.push({ path: cleanPath, content: fContent, encoding: 'utf-8' });
-            }
-            
-            // Add source files
-            files.forEach(f => {
-                const type = getFileType(f.name);
-                if (type === 'image' || type === 'audio') {
-                    if (f.code && f.code.startsWith('data:')) {
-                        ghFiles.push({ path: 'src/' + f.name, content: f.code.split(',')[1], encoding: 'base64' });
-                    }
-                } else {
-                    ghFiles.push({ path: 'src/' + f.name, content: f.code, encoding: 'utf-8' });
-                }
-            });
-            
-            // Add game.json
-            const gameJson = { name: "Foundry Project", version: "1.0.0", engineVersion: "0.1.0", main: "main.js" };
-            ghFiles.push({ path: 'game.json', content: JSON.stringify(gameJson, null, 4), encoding: 'utf-8' });
-            
-            // Tauri setup for GitHub Actions
-            const combinedCode = files.filter(f => f.name.endsWith('.js')).map(f => f.code).join('\n\n');
-            const cleanedCode = combinedCode.replace(/(?:const|let|var)\s*\{[^}]*\}\s*=\s*(?:window\.)?Foundry\s*;/g, '').replace(/import\s+[\s\S]*?\s+from\s+['"].*?['"];?/g, '');
-            
-            const assets = {};
-            files.forEach(f => {
-                const type = getFileType(f.name);
-                if (type === 'image' || type === 'audio') {
-                    assets[f.name] = `data:${getMimeType(f.name)};base64,${f.code}`;
-                } else if (type !== 'text' && !f.name.endsWith('.js')) {
-                    assets[f.name] = f.code;
-                }
-            });
-            
-            const indexHtml = "<!DOCTYPE html>\n" +
-"<html><head>\n" +
-"    <meta charset=\"utf-8\">\n" +
-"    <title>Foundry Game</title>\n" +
-"    <style>\n" +
-"        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }\n" +
-"        #game-container { width: 100%; height: 100%; }\n" +
-"    </style>\n" +
-"    <script type=\"importmap\">\n" +
-"        {\n" +
-"            \"imports\": {\n" +
-"                \"matter-js\": \"https://esm.sh/matter-js@0.19.0\"\n" +
-"            }\n" +
-"        }\n" +
-"    </script>\n" +
-"</head><body>\n" +
-"    <div id=\"game-container\"></div>\n" +
-"    <script type=\"module\">\n" +
-"        import { Foundry } from '../engine/Foundry.js';\n" +
-"        const FoundryAPI = Foundry;\n" +
-"        const assets = " + JSON.stringify(assets) + ";\n" +
-"        const engine = new Foundry.Engine(document.getElementById('game-container'));\n" +
-"        \n" +
-"        // Preload assets\n" +
-"        for (const [name, url] of Object.entries(assets)) {\n" +
-"            if (url.startsWith('data:image')) {\n" +
-"                engine.assets.loadImage(name, url);\n" +
-"            } else if (url.startsWith('data:audio')) {\n" +
-"                engine.assets.loadSound(name, url);\n" +
-"            }\n" +
-"        }\n\n" +
-"        const createSimClass = new Function('Foundry', 'assets', \"const { Simulation, Entity, Component, ObjectPool, Mathf, Vector2, Sprite, Animator, TextRenderer, ShapeRenderer, Tilemap, ParticleEmitter, PhysicsBody, AudioManager, TrailRenderer, LightSource, Parallax, Lifespan, CameraFollow, NavAgent, InputController, Scene, FSM, State, StateMachine, raycast, Flash, PhysicsConstraint, SoftBody, Health, DamageArea, TriggerArea, JuiceSystem, TweenManager, Easing, MeshRenderer, Light3D, ModelRenderer, PhysicsBody3D } = Foundry;\\n\" + cleanedCode + \"\\n\");\n" +
-"        \n" +
-"        const SimClass = createSimClass(FoundryAPI, assets);\n" +
-"        if (SimClass) {\n" +
-"            const simInstance = new SimClass(engine);\n" +
-"            engine.setSimulation(simInstance);\n" +
-"            engine.start({ splash: false });\n" +
-"        }\n" +
-"    </script>\n" +
-"</body></html>";
-            ghFiles.push({ path: 'index.html', content: indexHtml, encoding: 'utf-8' });
-            ghFiles.push({ path: 'package.json', content: JSON.stringify({ name: "foundry-game", version: "1.0.0", scripts: { "tauri": "tauri" }, devDependencies: { "@tauri-apps/cli": "^1.5.0" } }, null, 2), encoding: 'utf-8' });
-            ghFiles.push({ path: 'src-tauri/tauri.conf.json', content: JSON.stringify({
-              build: { beforeBuildCommand: "", beforeDevCommand: "", devPath: "../", distDir: "../" }, package: { productName: "Foundry Game", version: "1.0.0" },
-              tauri: { allowlist: { all: false }, bundle: { active: true, category: "Game", copyright: "", deb: { depends: [] }, externalBin: [], icon: [], identifier: "com.foundry.game", longDescription: "", macOS: { entitlements: null, exceptionDomain: "", frameworks: [], providerShortName: null, signingIdentity: null }, resources: [], shortDescription: "", targets: "all", windows: { certificateThumbprint: null, digestAlgorithm: "sha256", timestampUrl: "" } }, security: { csp: null }, windows: [ { fullscreen: false, height: 600, resizable: true, title: "Foundry Game", width: 800 } ] }
-            }, null, 2), encoding: 'utf-8' });
-            ghFiles.push({ path: 'src-tauri/Cargo.toml', content: `[package]\nname = "foundry-game"\nversion = "1.0.0"\ndescription = "A Foundry Engine Game"\nauthors = ["you"]\nedition = "2021"\n\n[build-dependencies]\ntauri-build = { version = "1.5.0", features = [] }\n\n[dependencies]\ntauri = { version = "1.5.0", features = [] }\nserde = { version = "1.0", features = ["derive"] }\nserde_json = "1.0"`, encoding: 'utf-8' });
-            ghFiles.push({ path: 'src-tauri/build.rs', content: `fn main() {\n  tauri_build::build()\n}`, encoding: 'utf-8' });
-            ghFiles.push({ path: 'src-tauri/src/main.rs', content: `#![cfg_attr(\n  all(not(debug_assertions), target_os = "windows"),\n  windows_subsystem = "windows"\n)]\n\nfn main() {\n  tauri::Builder::default()\n    .run(tauri::generate_context!())\n    .expect("error while running tauri application");\n}`, encoding: 'utf-8' });
-            
-            // GitHub Action for Tauri
-            const ghAction = `name: Build Tauri App
-
-on:
-  push:
-    branches: [ main, master ]
-  workflow_dispatch:
-
-jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        platform: [macos-latest, ubuntu-22.04, windows-latest]
-    runs-on: \${{ matrix.platform }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: setup node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-      - name: install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-      - name: install dependencies (ubuntu only)
-        if: matrix.platform == 'ubuntu-22.04'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.0-dev build-essential curl wget file libssl-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
-      - name: install frontend dependencies
-        run: npm install
-      - uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: \${{ secrets.GITHUB_TOKEN }}
-        with:
-          tagName: v\${{ github.run_number }}
-          releaseName: 'Foundry Game Release v\${{ github.run_number }}'
-          releaseBody: 'Automated release built with Tauri Action.'
-          releaseDraft: false
-          prerelease: false
-`;
-            ghFiles.push({ path: '.github/workflows/build.yml', content: ghAction, encoding: 'utf-8' });
-            
-            // Wait to make sure repo is initialized
-            await new Promise(r => setTimeout(r, 2000));
-            
-            // In GitHub API, to upload files, we can just PUT to /contents/ path.
-            // For many files, it's slow, but it's simple and works. 
-            // We should check if the file exists first to get the sha, but since we just created it or it's a new export,
-            // we'll try PUT directly. If it fails with 422 (sha needed), we fetch the sha and retry.
-            for (const file of ghFiles) {
-                setGithubStatus(`Uploading ${file.path}...`);
-                let url = `https://api.github.com/repos/${owner}/${githubRepo}/contents/${file.path}`;
-                
-                let fileSha = null;
-                // Get SHA if exists
-                try {
-                    const checkRes = await fetch(url, { headers: { 'Authorization': `token ${githubToken}`, 'Accept': 'application/vnd.github.v3+json' } });
-                    if (checkRes.ok) {
-                        const checkData = await checkRes.json();
-                        fileSha = checkData.sha;
-                    }
-                } catch(e) {}
-                
-                const body = {
-                    message: `Add ${file.path}`,
-                    content: file.encoding === 'base64' ? file.content : btoa(unescape(encodeURIComponent(file.content)))
-                };
-                if (fileSha) body.sha = fileSha;
-                
-                await fetch(url, {
-                    method: 'PUT',
-                    headers: { 'Authorization': `token ${githubToken}`, 'Accept': 'application/vnd.github.v3+json' },
-                    body: JSON.stringify(body)
-                });
-            }
-            
-            setGithubStatus(`Success! View at github.com/${owner}/${githubRepo} (Check Actions tab to see it build the .exe)`);
+            setGithubStatus(`Success! View at ${result.url} (Check Actions to see the desktop build)`);
             setTimeout(() => { setShowGithubModal(false); setGithubStatus(''); }, 5000);
-        } catch (e) {
-            console.error(e);
-            setGithubStatus('Error: ' + e.message);
+        } catch (error) {
+            console.error('GitHub export failed', error);
+            setGithubStatus(`Error: ${error.message}`);
+        } finally {
+            setGithubToken('');
+            setIsGithubExporting(false);
         }
     };
-
     const importProject = async (e) => {
         const file = e.target.files[0];
         if (!file) return;
@@ -1010,21 +717,21 @@ if (iframeRef.current && iframeRef.current.contentWindow) {
             {/* Top IDE Header */}
 
             <div className={`flex items-center justify-between px-2 md:px-4 lg:px-6 xl:px-8 py-2 xl:py-3 bg-[#0d0d0d] border-b border-[#222] shadow-[0_4px_20px_rgba(0,0,0,0.5)] shrink-0 w-full z-40 shadow-md ${ideMode === 'play' ? 'hidden md:flex' : ''}`}>
-                <div className="flex items-center gap-6">
+                <div className="flex items-center gap-2 sm:gap-6 min-w-0">
                     <div className="flex items-center gap-2">
                         
                         <div className="bg-green-500/20 p-1.5 rounded-lg border border-green-500/30"><FolderOpen size={18} className="text-green-400" /></div>
                         <h1 className="hidden sm:block text-lg font-black tracking-widest text-green-400" style={{ textShadow: "0 0 10px rgba(74, 222, 128, 0.4)" }}>FOUNDRY</h1>
                         <button 
                             onClick={() => setShowChangelog(true)}
-                            className="ml-2 px-2 py-0.5 bg-neutral-800 border border-neutral-700 hover:border-green-500/50 hover:bg-neutral-700 transition-colors rounded text-[10px] font-bold text-neutral-400 hover:text-green-400 flex items-center gap-1 uppercase tracking-wider"
+                            className="hidden sm:flex ml-2 px-2 py-0.5 bg-neutral-800 border border-neutral-700 hover:border-green-500/50 hover:bg-neutral-700 transition-colors rounded text-[10px] font-bold text-neutral-400 hover:text-green-400 items-center gap-1 uppercase tracking-wider"
                         >
                             <Rocket size={12} />
                             v0.1.2
                         </button>
 
                     </div>
-                    <div className="h-5 w-px bg-neutral-700" />
+                    <div className="hidden sm:block h-5 w-px bg-neutral-700" />
                     
                     <div className="hidden md:flex items-center gap-1 mr-4">
                         <button onClick={() => setLeftPanelOpen(!leftPanelOpen)} className={`p-1.5 rounded transition-colors ${leftPanelOpen ? 'bg-neutral-800 text-green-400' : 'text-neutral-500 hover:text-neutral-300'}`} title="Toggle File Explorer">
@@ -1122,7 +829,7 @@ if (iframeRef.current && iframeRef.current.contentWindow) {
                 {/* ========================================= */}
                 {/* CODE MODE                                 */}
                 {/* ========================================= */}
-                <div className={`flex-1 flex overflow-hidden ${ideMode !== 'code' ? 'hidden' : ''} ${mobileTab === "editor" ? "flex" : "hidden md:flex"}`}>
+                <div className={`flex-1 overflow-hidden ${ideMode === 'code' ? 'flex' : 'hidden'}`}>
                     {/* Left Sidebar (Explorer) */}
                     <div className={`${leftPanelOpen ? "md:w-64 lg:w-72 xl:w-80 md:border-r" : "md:w-0 md:overflow-hidden"} ${mobileTab === "files" ? "w-full flex-1 border-none flex" : "w-0 overflow-hidden hidden md:flex"} bg-[#0a0a0a] border-[#222] flex-col z-30 shrink-0 transition-all duration-300 ease-in-out`}>
                         <div className="p-3 border-b border-neutral-800 flex flex-col gap-2 relative bg-neutral-900/30">
@@ -1147,7 +854,7 @@ if (iframeRef.current && iframeRef.current.contentWindow) {
                                     <Upload size={12} /> Import
                                     <input type="file" accept=".zip" className="hidden" onChange={importProject} />
                                 </label>
-                                <button onClick={() => setShowExportModal(true)} className="flex-1 px-2 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 text-[10px] font-bold rounded flex items-center justify-center gap-1 transition-colors uppercase" title="Export Project">
+                                <button onClick={() => { setExportError(''); setShowExportModal(true); }} className="flex-1 px-2 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 text-[10px] font-bold rounded flex items-center justify-center gap-1 transition-colors uppercase" title="Export Project">
                                     <Download size={12} /> Export
                                 </button>
                             </div>
@@ -1156,6 +863,17 @@ if (iframeRef.current && iframeRef.current.contentWindow) {
                                     <Github size={12} /> Export to GitHub
                                 </button>
                             </div>
+                            {hostIntegration?.onSend && (
+                                <button
+                                    type="button"
+                                    onClick={() => void sendToHost()}
+                                    disabled={isSyncing}
+                                    className="w-full px-2 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-[10px] font-bold rounded flex items-center justify-center gap-1 transition-colors uppercase"
+                                >
+                                    <Rocket size={12} /> {hostIntegration.actionLabel || 'Send to Host'}
+                                </button>
+                            )}
+                            {hostIntegration?.statusLabel && <div className="text-[10px] text-neutral-500 truncate" title={hostIntegration.statusLabel}>{hostIntegration.statusLabel}</div>}
                         </div>
 
                         <div className="flex-1 flex flex-col min-h-0 bg-neutral-950">
@@ -1228,7 +946,7 @@ if (iframeRef.current && iframeRef.current.contentWindow) {
                     </div>
                     
                     {/* Center Editor */}
-                    <div className="flex-1 flex flex-col min-w-0">
+                    <div className={`${mobileTab === "editor" ? "flex" : "hidden md:flex"} flex-1 flex-col min-w-0`}>
                         {/* Editor Tabs */}
                         <div className="flex items-center justify-between bg-neutral-900 border-b border-neutral-800 shrink-0">
                             <div className="flex-1 flex overflow-x-auto no-scrollbar">
@@ -1394,11 +1112,11 @@ if (iframeRef.current && iframeRef.current.contentWindow) {
                 {/* ========================================= */}
                 {/* SCENE MODE                                */}
                 {/* ========================================= */}
-                <div className={`flex-1 flex overflow-hidden ${ideMode !== 'scene' ? 'hidden' : ''} ${mobileTab === "editor" ? "flex" : "hidden md:flex"}`}>
+                <div className={`flex-1 overflow-hidden ${ideMode === 'scene' ? 'flex' : 'hidden'}`}>
                     {/* Left Hierarchy (Temporarily disabled to combine with Scene view) */}
                     
                     {/* Center Scene View */}
-                    <div className="flex-1 bg-black relative flex items-center justify-center border-r border-neutral-800">
+                    <div className={`${mobileTab === "editor" ? "flex" : "hidden md:flex"} flex-1 bg-black relative items-center justify-center border-r border-neutral-800`}>
                         <div className="absolute inset-0 pointer-events-none" style={{ backgroundImage: 'radial-gradient(circle, #333 1px, transparent 1px)', backgroundSize: '40px 40px', opacity: 0.2 }} />
                         <span className="text-neutral-700 font-black text-2xl uppercase tracking-widest opacity-30">Scene Editor coming soon...</span>
                     </div>
@@ -1437,6 +1155,8 @@ if (iframeRef.current && iframeRef.current.contentWindow) {
                         <iframe ref={iframeRef} src="/sandbox.html" className="w-full h-full border-none bg-black" sandbox="allow-scripts allow-same-origin" onLoad={() => setTimeout(() => runCode(), 100)} />
                         {/* Mobile Stop FAB */}
                         <button 
+                            type="button"
+                            aria-label="Stop preview"
                             onClick={() => {
                                 setIdeMode('code');
                                 setIsPaused(false);
@@ -1515,28 +1235,38 @@ if (iframeRef.current && iframeRef.current.contentWindow) {
             
             
             {showExportModal && (
-                <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+                <div
+                    className="absolute inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+                    role="dialog"
+                    aria-modal="true"
+                    aria-labelledby="editor-export-title"
+                    onMouseDown={event => {
+                        if (event.target === event.currentTarget && !isExporting) setShowExportModal(false);
+                    }}
+                >
                     <div className="bg-neutral-900 border border-neutral-700 rounded-xl shadow-2xl max-w-sm w-full p-6 flex flex-col gap-4">
                         <div className="flex justify-between items-center">
-                            <h2 className="text-white font-bold">Export Game</h2>
-                            <button onClick={() => setShowExportModal(false)} className="text-neutral-500 hover:text-white"><X size={18} /></button>
+                            <h2 id="editor-export-title" className="text-white font-bold">Export Game</h2>
+                            <button type="button" onClick={() => setShowExportModal(false)} disabled={isExporting} aria-label="Close export dialog" className="text-neutral-500 hover:text-white disabled:opacity-40"><X size={18} /></button>
                         </div>
                         <p className="text-sm text-neutral-400">Choose how you want to export your project.</p>
+                        {isExporting && <div className="flex items-center gap-2 rounded-lg border border-blue-500/30 bg-blue-500/10 p-3 text-sm text-blue-200" role="status" aria-live="polite"><span className="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-current border-t-transparent" />Preparing project archive…</div>}
+                        {exportError && <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200" role="alert">{exportError}</div>}
                         <div className="flex flex-col gap-3 mt-2">
                             
-                            <button onClick={() => handleExport('standalone')} className="w-full bg-neutral-800 hover:bg-neutral-700 text-white font-bold py-3 px-4 rounded text-left flex flex-col transition-colors border border-neutral-700 hover:border-neutral-500">
-                                <span className="text-sm">Standalone (Single File)</span>
-                                <span className="text-xs text-neutral-400 font-normal mt-1">Single index.html file with all scripts and assets embedded.</span>
+                            <button disabled={isExporting} onClick={() => handleExport('standalone')} className="w-full bg-neutral-800 hover:bg-neutral-700 disabled:opacity-50 text-white font-bold py-3 px-4 rounded text-left flex flex-col transition-colors border border-neutral-700 hover:border-neutral-500">
+                                <span className="text-sm">Web Bundle (Embedded Game Assets)</span>
+                                <span className="text-xs text-neutral-400 font-normal mt-1">ZIP with index.html, embedded game assets, and the required engine modules.</span>
                             </button>
-                            <button onClick={() => handleExport('html')} className="w-full bg-neutral-800 hover:bg-neutral-700 text-white font-bold py-3 px-4 rounded text-left flex flex-col transition-colors border border-neutral-700 hover:border-neutral-500">
+                            <button disabled={isExporting} onClick={() => handleExport('html')} className="w-full bg-neutral-800 hover:bg-neutral-700 disabled:opacity-50 text-white font-bold py-3 px-4 rounded text-left flex flex-col transition-colors border border-neutral-700 hover:border-neutral-500">
                                 <span className="text-sm">Web (HTML5)</span>
                                 <span className="text-xs text-neutral-400 font-normal mt-1">index.html with separate game.js and assets folder.</span>
                             </button>
-                            <button onClick={() => handleExport('project')} className="w-full bg-neutral-800 hover:bg-neutral-700 text-white font-bold py-3 px-4 rounded text-left flex flex-col transition-colors border border-neutral-700 hover:border-neutral-500">
+                            <button disabled={isExporting} onClick={() => handleExport('project')} className="w-full bg-neutral-800 hover:bg-neutral-700 disabled:opacity-50 text-white font-bold py-3 px-4 rounded text-left flex flex-col transition-colors border border-neutral-700 hover:border-neutral-500">
                                 <span className="text-sm">Source Project</span>
                                 <span className="text-xs text-neutral-400 font-normal mt-1">Raw source files (src/ and assets/). Best for importing back later.</span>
                             </button>
-                            <button onClick={() => handleExport('tauri')} className="w-full bg-blue-900/40 hover:bg-blue-800 text-blue-100 font-bold py-3 px-4 rounded text-left flex flex-col transition-colors border border-blue-800 hover:border-blue-500">
+                            <button disabled={isExporting} onClick={() => handleExport('tauri')} className="w-full bg-blue-900/40 hover:bg-blue-800 disabled:opacity-50 text-blue-100 font-bold py-3 px-4 rounded text-left flex flex-col transition-colors border border-blue-800 hover:border-blue-500">
                                 <span className="text-sm">Desktop App (Tauri / EXE)</span>
                                 <span className="text-xs text-blue-300 font-normal mt-1">Includes Rust setup to build a native executable (Windows, macOS, Linux).</span>
                             </button>
@@ -1545,21 +1275,30 @@ if (iframeRef.current && iframeRef.current.contentWindow) {
                 </div>
             )}
 {showGithubModal && (
-                <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+                <div
+                    className="absolute inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+                    role="dialog"
+                    aria-modal="true"
+                    aria-labelledby="github-export-title"
+                    onMouseDown={event => {
+                        if (event.target === event.currentTarget) closeGithubModal();
+                    }}
+                >
                     <div className="bg-neutral-900 border border-neutral-700 rounded-xl shadow-2xl max-w-sm w-full p-6 flex flex-col gap-4">
                         <div className="flex justify-between items-center">
-                            <h2 className="text-white font-bold">Export to GitHub</h2>
-                            <button onClick={() => setShowGithubModal(false)} className="text-neutral-500 hover:text-white"><X size={18} /></button>
+                            <h2 id="github-export-title" className="text-white font-bold">Export to GitHub</h2>
+                            <button type="button" onClick={closeGithubModal} disabled={isGithubExporting} aria-label="Close GitHub export dialog" className="text-neutral-500 hover:text-white disabled:opacity-40"><X size={18} /></button>
+                        </div>
+                        <p className="text-xs text-amber-300/80">Experimental. The token is used only for this push, kept in memory, and cleared when the operation or dialog ends. New repositories are private.</p>
+                        <div className="flex flex-col gap-2">
+                            <label htmlFor="github-session-token" className="text-xs text-neutral-400 font-bold uppercase">Session-only GitHub token</label>
+                            <input id="github-session-token" type="password" value={githubToken} disabled={isGithubExporting} onChange={e => setGithubToken(e.target.value)} className="w-full bg-neutral-950 border border-neutral-800 text-white px-3 py-2 rounded text-sm outline-none focus:border-blue-500 disabled:opacity-50" />
                         </div>
                         <div className="flex flex-col gap-2">
-                            <label className="text-xs text-neutral-400 font-bold uppercase">Personal Access Token (repo scope)</label>
-                            <input type="password" value={githubToken} onChange={e => setGithubToken(e.target.value)} className="w-full bg-neutral-950 border border-neutral-800 text-white px-3 py-2 rounded text-sm outline-none focus:border-blue-500" />
+                            <label htmlFor="github-repository-name" className="text-xs text-neutral-400 font-bold uppercase">Repository Name</label>
+                            <input id="github-repository-name" type="text" value={githubRepo} disabled={isGithubExporting} onChange={e => setGithubRepo(e.target.value)} className="w-full bg-neutral-950 border border-neutral-800 text-white px-3 py-2 rounded text-sm outline-none focus:border-blue-500 disabled:opacity-50" />
                         </div>
-                        <div className="flex flex-col gap-2">
-                            <label className="text-xs text-neutral-400 font-bold uppercase">Repository Name</label>
-                            <input type="text" value={githubRepo} onChange={e => setGithubRepo(e.target.value)} className="w-full bg-neutral-950 border border-neutral-800 text-white px-3 py-2 rounded text-sm outline-none focus:border-blue-500" />
-                        </div>
-                        <button onClick={handleGithubExport} className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-2 rounded transition-colors mt-2">Create & Push</button>
+                        <button disabled={isGithubExporting || !githubToken.trim() || !githubRepo.trim()} onClick={handleGithubExport} className="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-bold py-2 rounded transition-colors mt-2">{isGithubExporting ? 'Pushing…' : 'Create & Push'}</button>
                         {githubStatus && <div className="text-xs text-center text-blue-400 font-mono mt-2">{githubStatus}</div>}
                     </div>
                 </div>
@@ -1625,7 +1364,7 @@ if (iframeRef.current && iframeRef.current.contentWindow) {
         
             {/* Bottom Mobile Navigation */}
             {ideMode !== 'play' && <div className="md:hidden flex items-center justify-around bg-[#0d0d0d] border-t border-[#222] p-1 z-50 shrink-0">
-                <button onClick={() => setMobileTab('files')} className={`flex flex-col items-center gap-1 p-2 rounded flex-1 ${mobileTab === 'files' ? 'text-green-400 bg-neutral-800' : 'text-neutral-500'}`}>
+                <button onClick={() => { setIdeMode('code'); setMobileTab('files'); }} className={`flex flex-col items-center gap-1 p-2 rounded flex-1 ${mobileTab === 'files' ? 'text-green-400 bg-neutral-800' : 'text-neutral-500'}`}>
                     <FolderOpen size={20} />
                     <span className="text-[10px] font-bold uppercase tracking-widest">Files</span>
                 </button>
@@ -1633,7 +1372,7 @@ if (iframeRef.current && iframeRef.current.contentWindow) {
                     <Code size={20} />
                     <span className="text-[10px] font-bold uppercase tracking-widest">Code/Scene</span>
                 </button>
-                <button onClick={() => setMobileTab('inspector')} className={`flex flex-col items-center gap-1 p-2 rounded flex-1 ${mobileTab === 'inspector' ? 'text-green-400 bg-neutral-800' : 'text-neutral-500'}`}>
+                <button onClick={() => { setIdeMode('scene'); setMobileTab('inspector'); }} className={`flex flex-col items-center gap-1 p-2 rounded flex-1 ${mobileTab === 'inspector' ? 'text-green-400 bg-neutral-800' : 'text-neutral-500'}`}>
                     <Settings size={20} />
                     <span className="text-[10px] font-bold uppercase tracking-widest">Inspector</span>
                 </button>

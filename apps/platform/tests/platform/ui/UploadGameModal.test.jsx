@@ -88,17 +88,17 @@ describe('UploadGameModal', () => {
     it('retries a failed transfer without creating another project or upload session', async () => {
         let createProjectCalls = 0;
         let createVersionCalls = 0;
-        vi.spyOn(apiClient, 'post').mockImplementation(async endpoint => {
+        vi.spyOn(apiClient.json, 'post').mockImplementation(async endpoint => {
             if (endpoint === '/api/games') {
                 createProjectCalls += 1;
-                return { ok: true, json: async () => ({ success: true, data: { id: 'created-game' } }) };
+                return { id: 'created-game' };
             }
             if (endpoint === '/api/games/created-game/versions') {
                 createVersionCalls += 1;
-                return { ok: true, json: async () => ({ success: true, data: { uploadUrl: '/upload', sessionId: 'session-1', versionId: 'version-1' } }) };
+                return { uploadUrl: '/upload', sessionId: 'session-1', versionId: 'version-1' };
             }
             if (endpoint === '/api/uploads/session-1/complete') {
-                return { ok: true, json: async () => ({ success: true, data: { status: 'READY' } }) };
+                return { status: 'READY' };
             }
             throw new Error(`Unexpected endpoint: ${endpoint}`);
         });

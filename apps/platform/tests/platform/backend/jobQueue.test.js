@@ -1,4 +1,4 @@
-import { afterEach, describe, it, expect, beforeEach } from 'vitest';
+import { afterEach, describe, it, expect, beforeEach, vi } from 'vitest';
 import { LocalSqliteProvider } from '../../../src/platform/backend/database/LocalSqliteProvider.js';
 import { LocalJobQueue } from '../../../src/platform/backend/jobs/LocalJobQueue.js';
 
@@ -12,12 +12,12 @@ describe('LocalJobQueue', () => {
         // Use 'async' mode to avoid auto-processing on enqueue during tests, we will manually trigger it
         process.env.JOB_MODE = 'async';
         queue = new LocalJobQueue(db);
-        queue.stop(); // stop auto polling
+        queue.pausePolling(); // stop auto polling while keeping manual poll available
     });
 
-    afterEach(() => {
-        queue.stop();
-        db.db.close();
+    afterEach(async () => {
+        await queue.stop();
+        await db.close();
         delete process.env.MAX_JOB_ATTEMPTS;
         delete process.env.JOB_MODE;
     });
@@ -97,7 +97,7 @@ describe('LocalJobQueue', () => {
     });
 
     it('inline mode performs transient retries without a polling worker', async () => {
-        queue.stop();
+        await queue.stop();
         process.env.JOB_MODE = 'inline';
         process.env.MAX_JOB_ATTEMPTS = '3';
         queue = new LocalJobQueue(db);
@@ -113,5 +113,68 @@ describe('LocalJobQueue', () => {
         expect(attempts).toBe(2);
         expect(job.status).toBe('SUCCEEDED');
         expect(job.attempts).toBe(2);
+    });
+
+    it('drains active work, cancels scheduled polling, and only then allows database shutdown', async () => {
+        let startedResolve;
+        let releaseResolve;
+        const started = new Promise(resolve => { startedResolve = resolve; });
+        const release = new Promise(resolve => { releaseResolve = resolve; });
+        queue.registerHandler('SLOW_JOB', async () => {
+            startedResolve();
+            await release;
+            await db.createUser({
+                uid: 'drained-user', email: '', displayName: 'Drained', avatarUrl: '',
+                role: 'DEVELOPER', createdAt: Date.now(), updatedAt: Date.now()
+            });
+        });
+
+        await queue.enqueue('SLOW_JOB', 'slow-target', {});
+        const poll = queue.poll();
+        await started;
+
+        let stopped = false;
+        const stop = queue.stop().then(() => { stopped = true; });
+        await Promise.resolve();
+        expect(stopped).toBe(false);
+        await expect(queue.enqueue('SLOW_JOB', 'rejected-target', {})).rejects.toMatchObject({ code: 'JOB_QUEUE_STOPPING' });
+
+        releaseResolve();
+        await Promise.all([poll, stop]);
+        expect(stopped).toBe(true);
+        expect(await db.getUser('drained-user')).toBeTruthy();
+
+        vi.useFakeTimers();
+        try {
+            const originalClaimNextJob = db.claimNextJob.bind(db);
+            let claimStartedResolve;
+            let releaseClaimResolve;
+            const claimStarted = new Promise(resolve => { claimStartedResolve = resolve; });
+            const releaseClaim = new Promise(resolve => { releaseClaimResolve = resolve; });
+            const claimNextJob = vi.spyOn(db, 'claimNextJob').mockImplementation(async (...args) => {
+                claimStartedResolve();
+                await releaseClaim;
+                return originalClaimNextJob(...args);
+            });
+
+            queue = new LocalJobQueue(db);
+            await vi.advanceTimersByTimeAsync(1000);
+            await claimStarted;
+
+            let stopped = false;
+            const stop = queue.stop().then(() => { stopped = true; });
+            await Promise.resolve();
+            expect(stopped).toBe(false);
+
+            releaseClaimResolve();
+            await stop;
+            expect(stopped).toBe(true);
+
+            await db.close();
+            await vi.advanceTimersByTimeAsync(3000);
+            expect(claimNextJob).toHaveBeenCalledTimes(1);
+        } finally {
+            vi.useRealTimers();
+        }
     });
 });

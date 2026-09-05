@@ -2,7 +2,35 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     match /projects/{projectId} {
-      allow read, write: if true;
+      function signedIn() {
+        return request.auth != null;
+      }
+
+      function ownsExistingProject() {
+        return signedIn() && resource.data.ownerUid == request.auth.uid;
+      }
+
+      function validProjectDocument() {
+        return request.resource.data.keys().hasOnly([
+            'ownerUid', 'files', 'createdAt', 'updatedAt'
+          ])
+          && request.resource.data.ownerUid is string
+          && request.resource.data.ownerUid == request.auth.uid
+          && request.resource.data.files is list
+          && request.resource.data.files.size() > 0
+          && request.resource.data.files.size() <= 100
+          && request.resource.data.createdAt is timestamp
+          && request.resource.data.updatedAt is timestamp;
+      }
+
+      allow get: if ownsExistingProject();
+      allow list: if false;
+      allow create: if signedIn() && validProjectDocument();
+      allow update: if ownsExistingProject()
+        && validProjectDocument()
+        && request.resource.data.ownerUid == resource.data.ownerUid
+        && request.resource.data.createdAt == resource.data.createdAt;
+      allow delete: if ownsExistingProject();
     }
   }
 }

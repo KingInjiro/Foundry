@@ -11,18 +11,22 @@ All uploaded games are untrusted code.
 - Uploaded ZIPs are private. Public `/api/cdn/*` delivery accepts only extracted game-asset paths.
 - Publishing is bound to the SHA-256 and byte length of the ZIP that passed validation; changing the signed-upload object afterward invalidates the version.
 - Validation and extraction reject traversal, absolute/encoded/non-portable paths, null bytes, missing entries, case/Unicode-colliding files, unsupported manifests/capabilities, disguised thumbnails and configured size/count-limit violations. Declared ZIP-bomb sizes are checked before decompression.
-- Public game documents receive a CSP `sandbox` response policy even when opened directly, plus `nosniff`, immutable caching, conditional/range support and public-asset-only CORS.
+- Public game documents receive a CSP `sandbox` response policy even when opened directly, plus `nosniff`, conditional/range support and public-asset-only CORS. Assets use `public, no-cache` so every reuse revalidates publication/moderation state.
 - Platform/account APIs are same-origin by default; explicitly trusted integration origins are configured with `CORS_ALLOWED_ORIGINS`.
 - Authentication is verified server-side for developer, Library, rating and follow mutations; game ownership is checked for project/version operations.
-- Rate limits cover upload creation/completion, publishing and discovery telemetry. They are in-memory and single-instance today.
+- SQLite-backed atomic rate limits cover project creation, editor writes, upload creation/completion, publishing/lifecycle, reports/moderation, ratings/follows, discovery telemetry/reads and catalog reads. Proxy-derived identity is enabled only with explicit trusted hop depth.
+- Reports and operator decisions are persisted. Only `ADMIN`/`MODERATOR` can list/resolve reports or change moderation state; each action records operator UID, time, reason and previous/next state. Non-active games are denied by catalog, details and CDN authorization.
+- Published typed Player launches cannot enable the legacy editor command path. The Worker contains no literal `eval`; editor-only commands use Blob module import under the stricter Foundry sandbox CSP.
 - Cloud credentials remain server-side. Browser Firebase configuration is public client configuration and must not contain R2 or Admin secrets.
 - Credential-free local auth/storage mode is development-only, binds to loopback by default and cannot expose the destructive E2E reset route.
 
-## Still required before distributed production
+## Remaining security/release validation
 
-- Distributed rate limiting and a durable job queue.
 - Deployment-level TLS/proxy validation and a CSP review whenever new third-party origins or browser capabilities are added.
 - Firebase role/ban/organization policy enforcement.
-- Malware/content moderation and abuse operations beyond structural package validation.
+- Malware scanning and abuse operations beyond the current report/quarantine/audit minimum.
 - Live R2/Firebase integration and penetration testing in the deployed environment.
+- External R2 byte recovery/retention; SQLite backup alone cannot restore deleted runtime objects.
 - A separately designed credential and validation model before external-storage publishing can be enabled.
+
+Single-node SQLite and the durable SQLite job queue are deliberate first-release constraints, not automatically a security defect. Multi-node deployment is unsupported by this profile.

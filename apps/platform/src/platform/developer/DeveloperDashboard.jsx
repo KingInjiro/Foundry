@@ -2,9 +2,10 @@ import { apiClient } from '../api/apiClient.js';
 import React, { useCallback, useEffect, useState } from 'react';
 import { useAuth } from '../auth/AuthContext.jsx';
 import { Link, Navigate, Route, Routes } from 'react-router-dom';
-import { FolderGit2, Gamepad2, Hammer, LogOut, Package, RefreshCw, UploadCloud } from 'lucide-react';
+import { AlertTriangle, FolderGit2, Gamepad2, Hammer, LogOut, Package, RefreshCw, Shield, UploadCloud } from 'lucide-react';
 import { ProjectManager } from './ProjectManager.jsx';
 import { UploadGameModal } from './UploadGameModal.jsx';
+import { ProtectedRouteGate } from '../auth/ProtectedRouteGate.jsx';
 
 function DashboardHome() {
     const { user, logout } = useAuth();
@@ -12,15 +13,22 @@ function DashboardHome() {
     const [games, setGames] = useState([]);
     const [loading, setLoading] = useState(true);
     const [loadError, setLoadError] = useState('');
+    const [recoveryItems, setRecoveryItems] = useState([]);
+    const [selectedRecovery, setSelectedRecovery] = useState(null);
+    const [platformProfile, setPlatformProfile] = useState(null);
 
     const loadGames = useCallback(async ({ silent = false } = {}) => {
         if (!silent) setLoading(true);
         setLoadError('');
         try {
-            const response = await apiClient.get('/api/games');
-            const result = await response.json();
-            if (!response.ok || !result.success) throw new Error(result.error?.message || 'Could not load projects.');
-            setGames(result.data || []);
+            const [projects, recovery, profile] = await Promise.all([
+                apiClient.json.get('/api/games'),
+                apiClient.json.get('/api/uploads/recovery'),
+                apiClient.json.get('/api/auth/me')
+            ]);
+            setGames(projects || []);
+            setRecoveryItems(recovery || []);
+            setPlatformProfile(profile || null);
         } catch (error) {
             setLoadError(error.message || 'Could not load projects.');
         } finally {
@@ -48,6 +56,11 @@ function DashboardHome() {
                     </div>
                 </div>
                 <div className="flex items-center gap-2 sm:gap-3 text-sm">
+                    {['ADMIN', 'MODERATOR'].includes(platformProfile?.role) && (
+                        <Link to="/moderation" className="inline-flex items-center gap-2 text-violet-300 hover:text-violet-200 px-2.5 py-2 transition-colors" title="Open moderation operations">
+                            <Shield className="w-4 h-4" /><span className="hidden sm:inline">Moderation</span>
+                        </Link>
+                    )}
                     <Link to="/player" className="inline-flex items-center gap-2 text-neutral-400 hover:text-white px-2.5 py-2 transition-colors" title="Open game discovery">
                         <Gamepad2 className="w-4 h-4" /><span className="hidden sm:inline">Discover</span>
                     </Link>
@@ -89,6 +102,29 @@ function DashboardHome() {
                         <p className="text-neutral-400 text-sm leading-relaxed">Validate and upload an HTML5, Unity WebGL, Godot, or Foundry ZIP package to platform storage.</p>
                     </button>
                 </div>
+
+                {recoveryItems.length > 0 && (
+                    <section className="mb-8 rounded-2xl border border-amber-500/25 bg-amber-500/5 p-5" aria-labelledby="upload-recovery-heading">
+                        <h3 id="upload-recovery-heading" className="flex items-center gap-2 font-bold text-amber-200"><AlertTriangle className="w-5 h-5" /> Upload & release recovery</h3>
+                        <p className="mt-1 text-sm text-neutral-400">These server-side states survived the page refresh. Resuming an interrupted transfer reuses its existing version.</p>
+                        <div className="mt-4 grid gap-2">
+                            {recoveryItems.slice(0, 8).map(item => (
+                                <div key={`${item.versionId}-${item.sessionId || 'version'}`} className="flex flex-col gap-3 rounded-xl border border-neutral-800 bg-neutral-950/60 p-3 sm:flex-row sm:items-center sm:justify-between">
+                                    <div className="min-w-0">
+                                        <div className="truncate text-sm font-bold">{item.gameTitle}</div>
+                                        <div className="text-xs text-neutral-500">Version {item.version || item.versionId} · {item.expired ? 'UPLOAD EXPIRED' : item.versionStatus}{item.publishError ? ` · ${item.publishError}` : ''}</div>
+                                    </div>
+                                    <div className="flex gap-2">
+                                        {item.resumable && (
+                                            <button type="button" onClick={() => { setSelectedRecovery(item); setUploadModalOpen(true); }} className="rounded-lg bg-amber-500/15 px-3 py-2 text-xs font-bold text-amber-200 hover:bg-amber-500/25">Select same ZIP</button>
+                                        )}
+                                        <Link to={`/developer/project/${item.gameId}`} className="rounded-lg bg-neutral-800 px-3 py-2 text-xs font-bold hover:bg-neutral-700">Open project</Link>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </section>
+                )}
 
                 <section aria-labelledby="projects-heading">
                     <div className="flex items-center justify-between gap-4 mb-4">
@@ -144,7 +180,8 @@ function DashboardHome() {
 
             <UploadGameModal
                 isOpen={isUploadModalOpen}
-                onClose={() => setUploadModalOpen(false)}
+                recoverySession={selectedRecovery}
+                onClose={() => { setUploadModalOpen(false); setSelectedRecovery(null); }}
                 onUploaded={() => loadGames({ silent: true })}
             />
         </div>
@@ -154,7 +191,7 @@ function DashboardHome() {
 export function DeveloperDashboard() {
     const { user, loading } = useAuth();
     if (loading) return <div className="min-h-screen bg-neutral-950 flex items-center justify-center text-neutral-400" role="status">Checking your session…</div>;
-    if (!user) return <Navigate to="/" replace />;
+    if (!user) return <ProtectedRouteGate area="Developer Dashboard" />;
 
     return (
         <Routes>
@@ -169,6 +206,7 @@ export function DeveloperDashboard() {
                     <ProjectManager />
                 </div>
             } />
+            <Route path="*" element={<Navigate to="/developer" replace />} />
         </Routes>
     );
 }

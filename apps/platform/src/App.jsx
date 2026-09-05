@@ -6,6 +6,7 @@ import { LandingPage } from './platform/LandingPage.jsx';
 const DeveloperDashboard = lazy(() => import('./platform/developer/DeveloperDashboard.jsx').then(module => ({ default: module.DeveloperDashboard })));
 const PlayerPlatform = lazy(() => import('./platform/player/PlayerPlatform.jsx').then(module => ({ default: module.PlayerPlatform })));
 const EditorRoute = lazy(() => import('./platform/editor/EditorRoute.jsx'));
+const ModerationDashboard = lazy(() => import('./platform/moderation/ModerationDashboard.jsx'));
 
 function RouteFallback() {
     return (
@@ -28,6 +29,9 @@ export default function App() {
                     <Route path="/developer/*" element={<DeveloperDashboard />} />
                     <Route path="/player/*" element={<PlayerPlatform />} />
                     <Route path="/editor" element={<EditorRoute />} />
+                    <Route path="/editor/*" element={<Navigate to="/editor" replace />} />
+                    <Route path="/moderation" element={<ModerationDashboard />} />
+                    <Route path="/moderation/*" element={<Navigate to="/moderation" replace />} />
                     <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>
             </Suspense>

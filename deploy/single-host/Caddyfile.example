@@ -1,0 +1,13 @@
+# Replace foundry.example.com with the hostname in PLATFORM_PUBLIC_BASE_URL.
+# Caddy obtains and renews TLS automatically once DNS points to this server.
+foundry.example.com {
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:3000
+
+    # Preserve application CSP, sandbox, cache, COOP/COEP, and referrer headers.
+    # Do not add a second, conflicting security-header policy here.
+    log {
+        output file /var/log/caddy/foundry-access.log
+        format json
+    }
+}

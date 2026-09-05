@@ -1,34 +1,86 @@
 # Production operations
 
-This document describes the production-facing controls already present in the Platform. It does not claim that external services have been acceptance-tested without deployment credentials.
+This is a compact map of implemented operational controls. Use `DEPLOYMENT_RUNBOOK.md` for procedures, `STORAGE_RECOVERY.md` for the DB/R2 consistency model, and the repository `RELEASE_CHECKLIST.md` for release evidence.
 
-## Probes and startup
+## Startup and runtime profile
 
-- `GET /api/health` is the liveness probe. It does not contact dependencies.
-- `GET /api/ready` verifies the database, storage provider and job queue and returns `503` if any dependency is unavailable.
-- Production startup performs the same database and storage checks before listening. `ALLOW_UNREADY_STARTUP=true` bypasses this only for controlled diagnostics.
-- Every response includes `X-Request-Id`. A valid caller-supplied ID is preserved, which makes support traces deterministic.
-- Request and lifecycle logs are newline-delimited JSON. Set `LOG_LEVEL=debug|info|warn|error`.
+- Production configuration is validated before providers are constructed. `cloud` fails closed on missing Firebase Admin/R2/persistent SQLite/build identity; `single-host` fails closed on missing persistent data directories/local secrets/loopback binding/single-host build identity.
+- Production rejects E2E/local modes, auth bypass, inline jobs, readiness bypass, and direct R2 redirects.
+- The generated client build profile must match runtime deployment mode. Cloud also binds the Firebase project; single-host profiles contain no Firebase identity.
+- `GET /api/health` is liveness only. `GET /api/ready` checks SQLite, the selected storage/auth provider, and job-queue state and returns `503` when unavailable.
+- `TRUST_PROXY_HOPS` is explicit. Defaulting to untrusted forwarded headers is not allowed.
 
-## Jobs and release cleanup
+## Logging and shutdown
 
-The concrete queue is persisted in the metadata database. Claims use a worker ID and an expiring lease; another worker can recover a job abandoned by a crashed process. Configure `JOB_LEASE_MS` longer than the expected uninterrupted unit of work. Cleanup handlers are idempotent, and object prefixes are removed before metadata is finalized.
+- Responses include `X-Request-Id`; JSON request/job/moderation logs carry correlation IDs where available.
+- Logger fields matching authorization, cookies, tokens, secrets, credentials, passwords, or game saves are recursively redacted.
+- SIGTERM/SIGINT stops new HTTP acceptance and cleanup scheduling, drains active jobs and SQLite transactions, then closes the DB. Exceeding `SHUTDOWN_GRACE_MS` exits non-zero; durable jobs remain reclaimable after lease expiry.
 
-Publishing, restoring and unpublishing preserve exactly one active `PUBLISHED` version. A version or project enters `DELETING` before cleanup is queued, immediately preventing catalog discovery and asset authorization.
+## Jobs and lifecycle
 
-## R2 delivery
+- Jobs, attempts, errors, worker ownership, and expiring leases are persisted in SQLite.
+- One active job per `(type,targetId)` and one `PUBLISHED` version per game are enforced by partial unique indexes.
+- Version/project deletion revokes access by entering `DELETING` before R2 cleanup.
+- Upload cleanup is idempotent; cleaned unpublished sources become explicitly `EXPIRED` when they can no longer be published.
 
-Uploaded ZIPs are private. Executable documents continue through `/api/cdn/*`, where Foundry applies publication checks and document sandbox headers. With `R2_DIRECT_DOWNLOADS=true`, non-document assets are redirected only after that publication check to short-lived signed R2 URLs. The redirect itself is `private, no-store`; the final immutable object can use its R2 cache metadata.
+## Delivery and moderation
 
-The R2 bucket CORS policy must allow the Platform origin to perform `GET` and range requests and must expose `Content-Length`, `Content-Range`, `ETag` and `Last-Modified`. Keep the signed URL TTL short; unpublish blocks new URLs immediately, while an already issued URL remains valid until its configured TTL expires.
+- Uploaded ZIPs remain private in R2 or the local object tree. Only canonical extracted paths of the active `PUBLISHED` version of an `ACTIVE` game are served.
+- Every `/api/cdn/*` read revalidates through SQLite using `Cache-Control: public, no-cache`. Executable documents receive a CSP sandbox.
+- `R2_DIRECT_DOWNLOADS=false` is mandatory in production because already-issued signed GET URLs cannot be revoked immediately.
+- Reports, report resolutions, game state changes, operator UID, timestamp, reason, and previous/next state are persisted. Only `ADMIN`/`MODERATOR` can use those endpoints.
 
-## Deployment checklist
+## Recovery
 
-1. Run the complete test/build check and verify the Engine integrity manifest.
-2. Back up the metadata database and test a restore before schema changes.
-3. Configure Firebase and R2 credentials; keep development auth bypass disabled.
-4. Confirm `/api/ready` from the deployment network.
-5. Exercise upload, validation, publish, range delivery, rollback, unpublish and deletion against the real bucket.
-6. Configure alerts for readiness failures, HTTP 5xx rates, failed jobs and cleanup backlog.
+- `db:backup` uses SQLite `VACUUM INTO`, not a raw live-file copy, and verifies integrity/FKs/migrations/hash.
+- `db:restore` refuses overwrite and restores only to a new path.
+- `db:rehearse` boots an isolated restored app and reads data.
+- `storage:check` compares SQLite references with R2 and reports missing objects and non-destructive orphan candidates.
+- R2 byte recovery requires an external retention/backup mechanism; the repository does not claim to provide one.
+- Single-host `foundry backup` coordinates a verified SQLite snapshot with the hashed local object tree; `foundry rehearse` restores and boots it in isolation. Same-disk copies still require an off-host copy for disaster recovery.
 
-The current SQLite profile is suitable for a single host. Multi-host API deployment still requires the PostgreSQL provider/backups and a production acceptance environment; do not infer those checks from local mocks.
+## Single-host operator commands
+
+```bash
+sudo foundry status
+sudo foundry logs 200
+sudo foundry doctor --verify-backup
+sudo foundry backup
+sudo foundry rehearse --backup /absolute/backup-directory
+sudo foundry storage-check
+sudo foundry update /tmp/Foundry-next.zip
+sudo foundry rollback
+```
+
+`foundry doctor` reports Node version, deployment profile, data/free-space state, SQLite quick/FK/migration checks, object directory, service state, and latest backup without printing secrets. Update and rollback preserve `/var/lib/foundry` and `/etc/foundry`; rollback never downgrades a DB schema.
+
+Local account recovery is deliberate operator work. Use `foundry reset-password`, `disable-user`, and `enable-user`; reset/disable revoke existing sessions. Self-service email recovery is not available in single-host v1.
+
+## Release gates
+
+```bash
+npm ci
+npm run check
+npm run test:smoke
+npm run test:e2e
+npm audit --audit-level=high
+```
+
+Single-host adds a separate production-mode acceptance gate:
+
+```bash
+npm run test:e2e:single-host
+```
+
+This gate uses local production auth/storage behind an HTTPS proxy and then restarts the compiled server against the same data root, checks Range/persistence/integrity, creates a coordinated backup, and performs an isolated restore rehearsal.
+
+Real cloud acceptance is separate:
+
+```bash
+npm run verify:staging:firebase
+npm run verify:staging:r2
+npm run test:staging
+npm run storage:check
+```
+
+Without real staging credentials, those checks are `NOT VERIFIED`, never local `PASS`.

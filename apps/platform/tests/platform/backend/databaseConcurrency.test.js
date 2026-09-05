@@ -15,7 +15,9 @@ describe('Database Provider Concurrency & Jobs', () => {
         `);
     });
 
-    afterEach(() => db.db.close());
+    afterEach(async () => {
+        if (db && !db.closed) await db.close();
+    });
 
     it('atomic publish claim', async () => {
         const claim1 = await db.claimVersionForPublishing('v1', 'user1');
@@ -60,6 +62,63 @@ describe('Database Provider Concurrency & Jobs', () => {
         
         const v = await db.getGameVersion('v1');
         expect(v.status).toBe('READY'); // should roll back to initial state
+    });
+
+    it('serializes overlapping async transactions on one connection', async () => {
+        db.db.exec('CREATE TABLE transaction_counter (value INTEGER NOT NULL); INSERT INTO transaction_counter VALUES (0);');
+
+        await Promise.all([30, 5, 15].map(delayMs => db.transaction(async tx => {
+            const current = tx.db.prepare('SELECT value FROM transaction_counter').get().value;
+            await new Promise(resolve => setTimeout(resolve, delayMs));
+            tx.db.prepare('UPDATE transaction_counter SET value = ?').run(current + 1);
+        })));
+
+        expect(db.db.prepare('SELECT value FROM transaction_counter').get().value).toBe(3);
+    });
+
+    it('recovers its transaction queue after a rollback', async () => {
+        db.db.exec('CREATE TABLE transaction_recovery (value INTEGER NOT NULL); INSERT INTO transaction_recovery VALUES (0);');
+
+        await expect(db.transaction(async tx => {
+            tx.db.prepare('UPDATE transaction_recovery SET value = 100').run();
+            await Promise.resolve();
+            throw new Error('rollback this operation');
+        })).rejects.toThrow('rollback this operation');
+
+        await db.transaction(async tx => {
+            tx.db.prepare('UPDATE transaction_recovery SET value = value + 1').run();
+        });
+
+        expect(db.db.prepare('SELECT value FROM transaction_recovery').get().value).toBe(1);
+    });
+
+    it('rejects nested transactions without deadlocking the queue', async () => {
+        await expect(db.transaction(tx => tx.transaction(async () => {})))
+            .rejects.toMatchObject({ code: 'NESTED_TRANSACTION_UNSUPPORTED' });
+
+        await expect(db.transaction(async () => 'still-usable')).resolves.toBe('still-usable');
+    });
+
+    it('waits for accepted transaction work during shutdown and rejects new work', async () => {
+        let release;
+        let started;
+        const startedPromise = new Promise(resolve => { started = resolve; });
+        const releasePromise = new Promise(resolve => { release = resolve; });
+        const transaction = db.transaction(async tx => {
+            tx.db.prepare("UPDATE game_versions SET status = 'VALIDATING' WHERE id = 'v1'").run();
+            started();
+            await releasePromise;
+            tx.db.prepare("UPDATE game_versions SET status = 'READY' WHERE id = 'v1'").run();
+        });
+        await startedPromise;
+
+        const closing = db.close();
+        await expect(db.transaction(async () => {})).rejects.toMatchObject({ code: 'DATABASE_CLOSING' });
+        release();
+        await transaction;
+        await closing;
+
+        expect(db.closed).toBe(true);
     });
 
     it('quota accounting calculates sizes correctly', async () => {

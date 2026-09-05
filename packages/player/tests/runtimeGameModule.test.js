@@ -1,11 +1,21 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
     createInlineGameModuleSource,
+    createEditorCommandModuleSource,
     getGameConstructor,
     prepareSimulationLifecycle
 } from '../src/runtimeGameModule.js';
 
 describe('runtime game module helpers', () => {
+    it('builds editor console commands as modules without eval or Function', () => {
+        const source = createEditorCommandModuleSource('engine.time.fps');
+        expect(source).toContain('context.engine');
+        expect(source).toContain('return (engine.time.fps)');
+        expect(source).not.toMatch(/\beval\s*\(/);
+        expect(source).not.toContain('new Function');
+        expect(() => createEditorCommandModuleSource('')).toThrow();
+    });
+
     it('converts the editor return convention into a module export', () => {
         const source = createInlineGameModuleSource('class Demo {}\nreturn Demo;');
         expect(source).toContain('export default Demo;');

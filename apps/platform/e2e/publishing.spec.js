@@ -30,7 +30,7 @@ test.describe('Publishing Flow', () => {
     await page.getByRole('button', { name: 'Manage & Publish' }).click();
 
     // 3. Publishing stays a separate, explicit action.
-    await expect(page.locator('text=Ready')).toBeVisible();
+    await expect(page.getByText('READY', { exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Publish' }).click();
     await expect(page.getByText('Active')).toBeVisible();
 
@@ -42,13 +42,14 @@ test.describe('Publishing Flow', () => {
     
     await page.goto('/player');
     await expect(page.getByText('PLAYABLE DISCOVERY')).toBeVisible();
-    await expect(page.locator('h3', { hasText: 'Generic E2E' })).toBeVisible();
+    const allGames = page.locator('#all-games');
+    await expect(allGames.locator('h3', { hasText: 'Generic E2E' })).toBeVisible();
 
     // 5. Open game
-    await page.getByRole('button', { name: 'Play Generic E2E' }).click();
+    await allGames.getByRole('button', { name: 'Play Generic E2E' }).click();
     
     // The player iframe should render
-    const frame = page.frameLocator('iframe');
+    const frame = page.frameLocator('iframe').frameLocator('iframe');
     await expect(frame.locator('[data-testid="generic-game-ready"]')).toHaveText('GENERIC E2E GAME READY');
   });
 });

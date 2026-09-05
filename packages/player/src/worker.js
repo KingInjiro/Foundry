@@ -7,6 +7,7 @@ import { IndexedDBPersistentChunkCache } from './streaming/IndexedDBPersistentCh
 import { PersistentStorageEvictionController } from './streaming/PersistentStorageEvictionController.ts';
 import {
     createInlineGameModuleSource,
+    createEditorCommandModuleSource,
     getGameConstructor,
     prepareSimulationLifecycle
 } from './runtimeGameModule.js';
@@ -69,6 +70,48 @@ function sanitizeForPostMessage(obj, depth = 0) {
 
 
 let engineInstance = null;
+let editorCommandsAllowed = false;
+
+function formatEditorConsoleValue(value) {
+    if (value === undefined) return 'undefined';
+    if (value === null) return 'null';
+    if (typeof value === 'string') return value;
+    const sanitized = sanitizeForPostMessage(value);
+    if (sanitized !== undefined) {
+        try { return JSON.stringify(sanitized); } catch { /* Fall through. */ }
+    }
+    return String(value);
+}
+
+self.__foundryEditorContext = {
+    get enabled() { return editorCommandsAllowed; },
+    get engine() { return engineInstance; },
+    get Foundry() { return self.Foundry; },
+    get assets() { return self.assets; },
+    report(value) {
+        self.postMessage({ type: 'log', level: 'log', msg: formatEditorConsoleValue(value) });
+    }
+};
+
+async function executeEditorConsoleCommand(code) {
+    let expression = true;
+    while (true) {
+        const source = createEditorCommandModuleSource(code, { expression });
+        const moduleUrl = URL.createObjectURL(new Blob([source], { type: 'text/javascript' }));
+        try {
+            await import(/* @vite-ignore */ moduleUrl);
+            return;
+        } catch (error) {
+            if (expression && error instanceof SyntaxError) {
+                expression = false;
+                continue;
+            }
+            throw error;
+        } finally {
+            URL.revokeObjectURL(moduleUrl);
+        }
+    }
+}
 
 // Mock DOM for worker
 self.window = self;
@@ -113,8 +156,10 @@ self.addEventListener('message', async (e) => {
             dpr,
             recoverState,
             streamingManifest,
-            capabilities = []
+            capabilities = [],
+            allowEditorCommands = false
         } = data;
+        editorCommandsAllowed = allowEditorCommands === true;
         const assets = receivedAssets && typeof receivedAssets === 'object' && !Array.isArray(receivedAssets)
             ? receivedAssets
             : {};
@@ -415,11 +460,10 @@ self.addEventListener('message', async (e) => {
         }
     } else if (data.type === 'eval') {
         try {
-            // Evaluates code in the context of the worker
-            const result = eval(data.code);
-            console.log(result);
+            if (!editorCommandsAllowed) throw new Error('Editor console commands are disabled for published games.');
+            await executeEditorConsoleCommand(data.code);
         } catch (e) {
-            console.error(e);
+            self.postMessage({ type: 'log', level: 'error', msg: e instanceof Error ? e.message : String(e) });
         }
     } else if (data.type === 'set_world_prop') {
         if (engineInstance && engineInstance.world) {

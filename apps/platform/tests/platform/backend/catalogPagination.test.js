@@ -15,8 +15,9 @@ describe('server-side catalog search and pagination', () => {
         await db.createUser({ uid: 'studio-south', email: 'south@test.local', displayName: 'South Studio', avatarUrl: '', role: 'DEVELOPER', createdAt: 1, updatedAt: 1 });
     });
 
-    afterEach(() => {
-        db.db.close();
+    afterEach(async () => {
+        await app?.locals?.jobQueue?.stop?.();
+        await db?.close();
         delete process.env.AUTH_DEV_BYPASS;
     });
 

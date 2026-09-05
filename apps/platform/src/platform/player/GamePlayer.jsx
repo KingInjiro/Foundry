@@ -1,6 +1,6 @@
 import { apiClient } from '../api/apiClient.js';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { Bookmark, ChevronLeft, Maximize2, RotateCcw, ShieldAlert, Shuffle } from 'lucide-react';
 import { SANDBOX_MESSAGE_TYPES } from '@foundry/player/sandboxProtocol';
 import { SandboxBridge } from './SandboxBridge';
@@ -27,6 +27,7 @@ function createLaunchId(gameId) {
 export function GamePlayer() {
     const { id } = useParams();
     const navigate = useNavigate();
+    const location = useLocation();
     const iframeRef = useRef(null);
     const bridgeRef = useRef(null);
     const sessionIdRef = useRef(null);
@@ -155,36 +156,56 @@ export function GamePlayer() {
         return () => { cancelled = true; };
     }, [id, retryNonce, user?.uid]);
 
-    const sendFoundryLaunch = useCallback(() => {
-        if (!launchConfig || launchConfig.type !== 'foundry') return false;
-        return bridgeRef.current?.send(SANDBOX_MESSAGE_TYPES.RUN_GAME, {
+    const sendRuntimeLaunch = useCallback(() => {
+        if (!launchConfig) return false;
+        const type = launchConfig.type === 'foundry'
+            ? SANDBOX_MESSAGE_TYPES.RUN_GAME
+            : SANDBOX_MESSAGE_TYPES.RUN_WEB_GAME;
+        return bridgeRef.current?.send(type, {
             launchId: launchConfig.launchId,
             gameUrl: launchConfig.gameUrl,
-            assets: {},
             capabilities: launchConfig.capabilities,
-            recoverState: launchConfig.recoverState,
-            streamingManifest: launchConfig.streamingManifest
+            ...(launchConfig.type === 'foundry' && {
+                assets: {},
+                recoverState: launchConfig.recoverState,
+                streamingManifest: launchConfig.streamingManifest
+            })
         }) || false;
     }, [launchConfig]);
 
     useEffect(() => {
         if (!iframeRef.current || !launchConfig) return;
 
-        // Foundry games communicate through our same-origin sandbox page, so
-        // their bridge can require an exact origin. Generic web games run in an
-        // opaque-origin iframe and are still pinned to the exact iframe window
-        // by SandboxBridge's event.source check.
-        const bridgeOrigin = launchConfig.type === 'foundry' ? window.location.origin : 'null';
-        const targetOrigin = launchConfig.type === 'foundry' ? window.location.origin : '*';
+        // Both outer documents are trusted Platform loaders, so messages use
+        // the exact Platform origin. A generic game's untrusted document runs
+        // in the loader's separate nested opaque-origin iframe.
+        const bridgeOrigin = window.location.origin;
+        const targetOrigin = window.location.origin;
         const bridge = new SandboxBridge(iframeRef.current, bridgeOrigin, targetOrigin);
         let active = true;
+        let watchdog = setTimeout(() => {
+            if (!active) return;
+            setLaunchError('The game runtime did not report READY before the launch timeout.');
+            setGameStatus('error');
+            void trackDiscoveryEvent({ sessionId: sessionIdRef.current, gameId: id, eventType: 'game_error' });
+        }, 15_000);
+        const clearWatchdog = () => {
+            clearTimeout(watchdog);
+            watchdog = null;
+        };
         bridgeRef.current = bridge;
 
         bridge.on(SANDBOX_MESSAGE_TYPES.SANDBOX_READY, () => {
-            sendFoundryLaunch();
+            setGameStatus('booting');
+            sendRuntimeLaunch();
+        });
+        bridge.on(SANDBOX_MESSAGE_TYPES.GAME_BOOTING, (payload) => {
+            if (payload?.launchId && payload.launchId !== launchConfig.launchId) return;
+            setGameStatus('booting');
         });
         bridge.on(SANDBOX_MESSAGE_TYPES.GAME_READY, (payload) => {
             if (payload?.launchId && payload.launchId !== launchConfig.launchId) return;
+            clearWatchdog();
             console.log('Platform received GAME_READY:', payload);
             setGameStatus('ready');
             setLaunchError('');
@@ -195,6 +216,7 @@ export function GamePlayer() {
         });
         bridge.on(SANDBOX_MESSAGE_TYPES.GAME_ERROR, (payload) => {
             if (payload?.launchId && payload.launchId !== launchConfig.launchId) return;
+            clearWatchdog();
             console.error('Platform received GAME_ERROR:', payload);
             setLaunchError(payload?.message || 'The game runtime stopped unexpectedly.');
             setGameStatus('error');
@@ -235,14 +257,15 @@ export function GamePlayer() {
         // This covers an iframe that finished loading before the bridge effect
         // ran. SANDBOX_READY and iframe onLoad provide the other two race-safe
         // paths; the sandbox deduplicates them with launchId.
-        sendFoundryLaunch();
+        sendRuntimeLaunch();
 
         return () => {
             active = false;
+            clearWatchdog();
             bridge.destroy();
             bridgeRef.current = null;
         };
-    }, [launchConfig, navigate, id, sendFoundryLaunch]);
+    }, [launchConfig, navigate, id, sendRuntimeLaunch]);
 
     const handleFullscreen = async () => {
         try {
@@ -318,7 +341,8 @@ export function GamePlayer() {
         <div className="flex flex-col h-screen bg-black text-white">
             <header className="flex-none flex items-center justify-between px-4 md:px-6 py-3 bg-neutral-900 border-b border-neutral-800">
                 <button
-                    onClick={() => navigate(`/player/game/${id}`)}
+                    onClick={() => location.state?.fromDetails ? navigate(-1) : navigate(`/player/game/${id}`)}
+                    aria-label="Game Details"
                     className="flex items-center gap-2 text-neutral-400 hover:text-white transition-colors text-sm font-medium"
                 >
                     <ChevronLeft className="w-5 h-5" />
@@ -405,21 +429,14 @@ export function GamePlayer() {
                             allowFullScreen={launchConfig.allowFullScreen}
                             className="w-full h-full border-none bg-black"
                             onLoad={() => {
-                                if (launchConfig.type === 'foundry') {
-                                    sendFoundryLaunch();
-                                } else {
-                                    setGameStatus('ready');
-                                    if (!readyTrackedRef.current) {
-                                        readyTrackedRef.current = true;
-                                        void trackDiscoveryEvent({ sessionId: sessionIdRef.current, gameId: id, eventType: 'game_ready' });
-                                    }
-                                }
+                                setGameStatus('booting');
+                                sendRuntimeLaunch();
                             }}
                         />
-                        {gameStatus === 'loading' && (
+                        {(gameStatus === 'loading' || gameStatus === 'booting') && (
                             <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/75 text-neutral-300 pointer-events-none" role="status" aria-live="polite" data-testid="game-launch-status">
                                 <div className="w-8 h-8 border-2 border-neutral-700 border-t-blue-500 rounded-full animate-spin" />
-                                <div>Starting secure game runtime…</div>
+                                <div>{gameStatus === 'booting' ? 'Waiting for game READY…' : 'Starting secure game runtime…'}</div>
                             </div>
                         )}
                     </div>

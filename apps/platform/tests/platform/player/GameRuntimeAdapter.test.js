@@ -34,8 +34,10 @@ describe('GameRuntimeAdapter', () => {
         }, { location: '/api/cdn/games/g/versions/v/extracted' });
 
         expect(config.capabilities).toEqual(['downloads']);
-        expect(config.sandboxAttributes).toBe('allow-scripts allow-downloads');
-        expect(config.sandboxAttributes).not.toContain('allow-same-origin');
+        expect(config.entryUrl).toBe('/generic-sandbox.html');
+        expect(config.gameUrl).toBe('/api/cdn/games/g/versions/v/extracted/index.html');
+        expect(config.sandboxAttributes).toBe('allow-scripts allow-downloads allow-same-origin');
+        expect(config.entryUrl).toBe('/generic-sandbox.html');
         expect(runtimeSupportsCapability('web', 'storage')).toBe(false);
     });
 

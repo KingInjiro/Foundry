@@ -2,7 +2,7 @@ import { JobQueue } from './JobQueue.js';
 import crypto from 'crypto';
 
 export class LocalJobQueue extends JobQueue {
-    constructor(dbProvider, handlers = {}) {
+    constructor(dbProvider, handlers = {}, options = {}) {
         super();
         this.db = dbProvider;
         this.handlers = handlers;
@@ -13,10 +13,14 @@ export class LocalJobQueue extends JobQueue {
             ? configuredLeaseMs
             : 60000;
         this.polling = false;
+        this.stopping = false;
+        this.activePoll = null;
+        this.activeJobs = new Set();
+        this.logger = options.logger || null;
         
         // Polling loop if async mode
         if (this.mode === 'async') {
-            this.interval = setInterval(() => this.poll(), 1000);
+            this.interval = setInterval(() => { void this.poll(); }, 1000);
             this.interval.unref?.();
         }
     }
@@ -26,6 +30,11 @@ export class LocalJobQueue extends JobQueue {
     }
 
     async enqueue(jobType, targetId, payload) {
+        if (this.stopping) {
+            const error = new Error('Job queue is stopping and cannot accept new work.');
+            error.code = 'JOB_QUEUE_STOPPING';
+            throw error;
+        }
         // Enforce idempotency: one active job per target + type
         const existing = await this.db.getActiveJob(jobType, targetId);
         if (existing) {
@@ -52,6 +61,7 @@ export class LocalJobQueue extends JobQueue {
             if (winner) return winner.id;
             throw error;
         }
+        this.logger?.info('job_enqueued', { jobId: job.id, jobType, targetId });
 
         if (this.mode === 'inline') {
             // Inline mode has no polling worker, so it must also own retries.
@@ -68,14 +78,23 @@ export class LocalJobQueue extends JobQueue {
     }
 
     async poll() {
-        if (this.polling) return;
-        this.polling = true;
-        try {
-            const job = await this.db.claimNextJob(this.workerId, this.leaseMs);
-            if (job) await this.processJob(job);
-        } finally {
-            this.polling = false;
-        }
+        if (this.stopping) return;
+        if (this.activePoll) return this.activePoll;
+        const operation = (async () => {
+            this.polling = true;
+            try {
+                if (this.stopping) return;
+                const job = await this.db.claimNextJob(this.workerId, this.leaseMs);
+                if (job) await this.processJob(job);
+            } finally {
+                this.polling = false;
+            }
+        })();
+        this.activePoll = operation.finally(() => {
+            if (this.activePoll === tracked) this.activePoll = null;
+        });
+        const tracked = this.activePoll;
+        return tracked;
     }
 
     async getStatus() {
@@ -83,11 +102,22 @@ export class LocalJobQueue extends JobQueue {
             mode: this.mode,
             workerId: this.workerId,
             polling: this.polling,
+            stopping: this.stopping,
             ...(typeof this.db.getJobQueueStats === 'function' ? await this.db.getJobQueueStats() : {})
         };
     }
 
     async processJob(job) {
+        const operation = this.processJobInternal(job);
+        this.activeJobs.add(operation);
+        try {
+            return await operation;
+        } finally {
+            this.activeJobs.delete(operation);
+        }
+    }
+
+    async processJobInternal(job) {
         const handler = this.handlers[job.type];
         if (!handler) {
             await this.db.updateJobStatus(job.id, 'FAILED', 'No handler registered', null, job.workerId || null);
@@ -95,6 +125,7 @@ export class LocalJobQueue extends JobQueue {
         }
 
         await this.db.updateJobStatus(job.id, 'RUNNING', null, null, job.workerId || null);
+        this.logger?.info('job_started', { jobId: job.id, jobType: job.type, targetId: job.targetId, workerId: job.workerId || this.workerId });
         const heartbeatIntervalMs = Math.max(1000, Math.floor(this.leaseMs / 3));
         const heartbeat = job.workerId && typeof this.db.renewJobLease === 'function'
             ? setInterval(() => {
@@ -106,6 +137,7 @@ export class LocalJobQueue extends JobQueue {
         try {
             await handler(JSON.parse(job.payload), job);
             await this.db.updateJobStatus(job.id, 'SUCCEEDED', null, null, job.workerId || null);
+            this.logger?.info('job_succeeded', { jobId: job.id, jobType: job.type, targetId: job.targetId, attempts: job.attempts });
             return 'SUCCEEDED';
         } catch (err) {
             const isPermanent = err.isPermanent || false;
@@ -116,15 +148,40 @@ export class LocalJobQueue extends JobQueue {
                 : 3;
             const nextStatus = isPermanent || newAttempts >= maxAttempts ? 'FAILED' : 'RETRYING';
             await this.db.updateJobStatus(job.id, nextStatus, err.message, newAttempts, job.workerId || null);
+            this.logger?.error('job_failed', {
+                jobId: job.id,
+                jobType: job.type,
+                targetId: job.targetId,
+                attempts: newAttempts,
+                nextStatus,
+                error: err
+            });
             return nextStatus;
         } finally {
             if (heartbeat) clearInterval(heartbeat);
         }
     }
 
-    stop() {
+    pausePolling() {
         if (this.interval) {
             clearInterval(this.interval);
+            this.interval = null;
         }
+    }
+
+    async stop() {
+        if (this.stopping) {
+            await Promise.allSettled([
+                ...(this.activePoll ? [this.activePoll] : []),
+                ...this.activeJobs
+            ]);
+            return;
+        }
+        this.stopping = true;
+        this.pausePolling();
+        await Promise.allSettled([
+            ...(this.activePoll ? [this.activePoll] : []),
+            ...this.activeJobs
+        ]);
     }
 }

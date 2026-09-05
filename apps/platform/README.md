@@ -27,13 +27,13 @@ npm run local:reset
 
 ## Connected development
 
-For the real Firebase/R2 integration, copy `.env.example` to `.env`, fill every R2 value, configure Firebase Admin default credentials in the runtime environment, then run:
+For a connected non-production environment, copy `.env.example` to `.env`, fill every R2 value, and configure Firebase Admin default credentials. Production builds use the explicit `VITE_FIREBASE_*` values rather than the bundled development JSON; production startup verifies that the built Firebase project matches Firebase Admin.
 
 ```bash
 npm run dev
 ```
 
-The browser Firebase configuration is in `firebase-applet-config.json`. The server loads `.env` through `dotenv`; secrets must never be added to the browser configuration or committed.
+`firebase-applet-config.json` is development-only browser configuration. The server loads `.env` through `dotenv`; secrets must never be added to browser configuration or committed.
 
 Account and metadata APIs are same-origin unless a trusted integration origin is listed in `CORS_ALLOWED_ORIGINS`. Public extracted assets keep their separate wildcard CORS policy because opaque game frames and streaming fetchers need it.
 
@@ -45,13 +45,13 @@ Published package metadata drives the actual catalog: supported thumbnails appea
 
 Discovery remembers visited titles for the current browser tab, so **Play Something Now** and **Next Game** traverse the catalog before starting a new cycle. Catalog query, selected tag and sort order are URL-backed; filtering, sorting and bounded cursor pagination run on the server, and public pages support ETag revalidation. Signed-in players can remove saved games, hide individual Continue Playing entries, and unfollow creators directly in Library; hiding history does not delete telemetry and the title reappears after a new launch.
 
-The server binds publication to the validated ZIP hash, enforces one active release per game, serves only published extracted assets, supports immutable byte-range/conditional delivery, and applies a CSP sandbox to game documents even on direct navigation. Developers can unpublish, restore an archived runtime, delete an inactive version, or delete a whole project. Destructive cleanup is queued and idempotent; `DELETING` removes access before storage cleanup begins. Optional gated R2 redirects offload non-document assets through short-lived signed URLs while executable documents remain behind the security-header proxy. Completed source ZIPs are retained for seven days by default so READY or failed versions can be published/retried; after cleanup an unpublished version is explicitly marked expired.
+The server binds publication to the validated ZIP hash, enforces one active release per game, serves only published extracted assets, supports byte ranges and conditional delivery, and applies a CSP sandbox to game documents even on direct navigation. Developers can unpublish, restore an archived runtime, delete an inactive version, or delete a whole project. Destructive cleanup is queued and idempotent; `DELETING` removes access before storage cleanup begins. Production asset responses revalidate through the SQLite moderation gate (`public, no-cache`); direct signed R2 downloads are rejected in production because an issued URL cannot be revoked immediately. Completed source ZIPs are retained for seven days by default so READY or failed versions can be published/retried; after cleanup an unpublished version is explicitly marked expired.
 
 External-storage publishing is intentionally not exposed in the dashboard until its server-side validation and persistence flow exists. The UI does not claim that a URL was connected or published when no backend operation occurred.
 
 Developers can edit a project's public title and description from its management page. A failed package transfer can reuse its project and upload session, and repeating completion after a lost response is safe; validated version metadata and completed-session state are committed together.
 
-Operational endpoints separate liveness (`/api/health`) from dependency readiness (`/api/ready`). Responses carry `X-Request-Id`, server request logs are JSON, rate-limit counters are database-backed, and durable job claims use recoverable worker leases. See [PRODUCTION_OPERATIONS.md](PRODUCTION_OPERATIONS.md) for deployment boundaries and the live-environment checklist.
+Operational endpoints separate liveness (`/api/health`) from dependency readiness (`/api/ready`). Responses carry `X-Request-Id`, server request/job logs are JSON with credential redaction, rate-limit counters are database-backed, and durable job claims use recoverable worker leases. `ADMIN`/`MODERATOR` users have a protected report queue and audited quarantine/hide/restore workflow at `/moderation`; the first operator is created only through the administrative CLI. See [PRODUCTION_OPERATIONS.md](PRODUCTION_OPERATIONS.md), [DEPLOYMENT_RUNBOOK.md](DEPLOYMENT_RUNBOOK.md), and [STORAGE_RECOVERY.md](STORAGE_RECOVERY.md).
 
 ## Verification
 

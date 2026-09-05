@@ -10,11 +10,31 @@ function serializeError(error) {
     };
 }
 
+const SENSITIVE_FIELD = /(?:authorization|cookie|token|secret|password|credential|privateKey|gameSave|saveData)/i;
+
+function normalizeValue(value, key, seen, depth = 0) {
+    if (SENSITIVE_FIELD.test(key)) return '[REDACTED]';
+    if (value instanceof Error) return serializeError(value);
+    if (value === null || value === undefined || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return value;
+    if (typeof value === 'bigint') return String(value);
+    if (value instanceof Date) return value.toISOString();
+    if (Buffer.isBuffer(value) || value instanceof Uint8Array) return `[binary:${value.byteLength}]`;
+    if (depth >= 5) return '[TRUNCATED]';
+    if (typeof value === 'object') {
+        if (seen.has(value)) return '[CIRCULAR]';
+        seen.add(value);
+        if (Array.isArray(value)) return value.slice(0, 100).map(item => normalizeValue(item, key, seen, depth + 1));
+        return Object.fromEntries(Object.entries(value).slice(0, 100).map(([childKey, childValue]) => [
+            childKey,
+            normalizeValue(childValue, childKey, seen, depth + 1)
+        ]));
+    }
+    return String(value);
+}
+
 function normalizeFields(fields = {}) {
-    return Object.fromEntries(Object.entries(fields).map(([key, value]) => [
-        key,
-        value instanceof Error ? serializeError(value) : value
-    ]));
+    const seen = new WeakSet();
+    return Object.fromEntries(Object.entries(fields).map(([key, value]) => [key, normalizeValue(value, key, seen)]));
 }
 
 export class JsonLogger {

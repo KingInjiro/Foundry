@@ -1,7 +1,7 @@
 import React from 'react';
 import { motion } from 'motion/react';
 import { Link } from 'react-router-dom';
-import { Code, Gamepad2, Hammer, Zap, Globe, Shuffle } from 'lucide-react';
+import { Bookmark, Code, Gamepad2, Hammer, Zap, Globe, LogOut, Shuffle } from 'lucide-react';
 import { useAuth } from './auth/AuthContext.jsx';
 import { PlayNowButton } from './discovery/PlayNowButton.jsx';
 
@@ -10,28 +10,28 @@ export function LandingPage() {
 
     return (
         <div className="min-h-screen bg-neutral-950 text-white flex flex-col font-sans">
-            <header className="flex items-center justify-between px-8 py-6 border-b border-neutral-800 bg-neutral-950/80 backdrop-blur-md sticky top-0 z-50">
-                <Link to="/" className="flex items-center gap-3">
-                    <div className="w-10 h-10 bg-green-500 rounded-lg flex items-center justify-center shadow-lg shadow-green-500/20">
+            <header className="flex items-center justify-between gap-2 px-3 sm:px-8 py-4 sm:py-6 border-b border-neutral-800 bg-neutral-950/80 backdrop-blur-md sticky top-0 z-50">
+                <Link to="/" className="flex items-center gap-3 shrink-0" aria-label="Foundry home">
+                    <div className="w-9 h-9 sm:w-10 sm:h-10 bg-green-500 rounded-lg flex items-center justify-center shadow-lg shadow-green-500/20">
                         <Hammer className="w-6 h-6 text-neutral-950" />
                     </div>
-                    <h1 className="text-xl font-bold tracking-tight">Foundry</h1>
+                    <h1 className="hidden md:block text-xl font-bold tracking-tight">Foundry</h1>
                 </Link>
 
-                <div className="flex items-center gap-4 text-sm font-medium">
-                    <Link to="/player" className="text-neutral-400 hover:text-white transition-colors">Discover</Link>
-                    {user && <Link to="/player/library" className="text-neutral-400 hover:text-white transition-colors">Library</Link>}
-                    <Link to="/developer" className="text-neutral-400 hover:text-white transition-colors">Developers</Link>
-                    <div className="h-4 w-px bg-neutral-800" />
+                <nav className="flex items-center gap-1 sm:gap-4 text-sm font-medium" aria-label="Primary navigation">
+                    <Link to="/player" aria-label="Discover" className="inline-flex items-center justify-center rounded-lg p-2 sm:p-0 text-neutral-400 hover:text-white hover:bg-neutral-900 sm:hover:bg-transparent transition-colors"><Gamepad2 className="w-5 h-5 sm:hidden" /><span className="hidden sm:inline">Discover</span></Link>
+                    {user && <Link to="/player/library" aria-label="Library" className="inline-flex items-center justify-center rounded-lg p-2 sm:p-0 text-neutral-400 hover:text-white hover:bg-neutral-900 sm:hover:bg-transparent transition-colors"><Bookmark className="w-5 h-5 sm:hidden" /><span className="hidden sm:inline">Library</span></Link>}
+                    <Link to="/developer" aria-label="Developers" className="inline-flex items-center justify-center rounded-lg p-2 sm:p-0 text-neutral-400 hover:text-white hover:bg-neutral-900 sm:hover:bg-transparent transition-colors"><Code className="w-5 h-5 sm:hidden" /><span className="hidden sm:inline">Developers</span></Link>
+                    <div className="hidden sm:block h-4 w-px bg-neutral-800" />
                     {user ? (
-                        <div className="flex items-center gap-4">
+                        <div className="flex items-center gap-1 sm:gap-4">
                             <span className="hidden md:inline text-neutral-400">{user.displayName || user.email}</span>
-                            <button onClick={logout} className="text-white bg-neutral-800 hover:bg-neutral-700 px-4 py-2 rounded-md transition-colors">Sign Out</button>
+                            <button type="button" onClick={logout} aria-label="Sign Out" className="inline-flex items-center justify-center text-white bg-neutral-800 hover:bg-neutral-700 p-2 sm:px-4 sm:py-2 rounded-md transition-colors"><LogOut className="w-5 h-5 sm:hidden" /><span className="hidden sm:inline">Sign Out</span></button>
                         </div>
                     ) : (
-                        <button onClick={login} className="text-white bg-neutral-800 hover:bg-neutral-700 px-4 py-2 rounded-md transition-colors">Sign In</button>
+                        <button type="button" onClick={login} className="text-white bg-neutral-800 hover:bg-neutral-700 px-3 sm:px-4 py-2 rounded-md transition-colors">Sign In</button>
                     )}
-                </div>
+                </nav>
             </header>
 
             <main className="flex-1">

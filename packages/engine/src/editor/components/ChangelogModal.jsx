@@ -1,18 +1,34 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { X, Rocket, Cpu, Globe, Boxes, Zap } from 'lucide-react';
 
 export function ChangelogModal({ onClose }) {
+    useEffect(() => {
+        const onKeyDown = event => {
+            if (event.key === 'Escape') onClose();
+        };
+        window.addEventListener('keydown', onKeyDown);
+        return () => window.removeEventListener('keydown', onKeyDown);
+    }, [onClose]);
+
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+        <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="editor-changelog-title"
+            onMouseDown={event => {
+                if (event.target === event.currentTarget) onClose();
+            }}
+        >
             <div className="bg-[#111] border border-neutral-800 rounded-xl w-full max-w-2xl max-h-[85vh] overflow-hidden flex flex-col shadow-2xl">
                 <div className="flex items-center justify-between p-4 border-b border-neutral-800 bg-[#161616]">
                     <div className="flex items-center gap-3">
                         <div className="bg-green-500/20 p-2 rounded-lg text-green-400">
                             <Rocket size={20} />
                         </div>
-                        <h2 className="text-xl font-bold text-white tracking-widest">CHANGELOG</h2>
+                        <h2 id="editor-changelog-title" className="text-xl font-bold text-white tracking-widest">CHANGELOG</h2>
                     </div>
-                    <button onClick={onClose} className="text-neutral-500 hover:text-white transition-colors">
+                    <button type="button" onClick={onClose} aria-label="Close changelog dialog" className="text-neutral-500 hover:text-white transition-colors">
                         <X size={24} />
                     </button>
                 </div>

@@ -13,7 +13,10 @@ describe('Backend API', () => {
         app = createApp(db);
     });
 
-    afterAll(() => db.db.close());
+    afterAll(async () => {
+        await app?.locals?.jobQueue?.stop?.();
+        await db.close();
+    });
 
     it('GET /api/health should return ok', async () => {
         const res = await request(app).get('/api/health');

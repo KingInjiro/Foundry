@@ -44,7 +44,8 @@ describe('sandbox protocol', () => {
                 assets: {},
                 capabilities: [],
                 recoverState: null,
-                streamingManifest: null
+                streamingManifest: null,
+                allowEditorCommands: false
             }
         });
     });
@@ -98,6 +99,7 @@ describe('sandbox protocol', () => {
         expect(request.launchId).toBeNull();
         expect(request.init.code).toContain('return Game');
         expect(request.init.assets).toBe(assets);
+        expect(request.init.allowEditorCommands).toBe(true);
     });
 
     it.each([

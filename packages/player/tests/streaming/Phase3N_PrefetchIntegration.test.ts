@@ -68,19 +68,21 @@ describe('Phase 3N - Prefetch Integration', () => {
         const budget = new MemoryBudgetManager({ maxMemoryBytes: 10 * 1024 * 1024, observability: obs });
         const controller = new StreamingRuntimeController(manifest, fetcher, budget, obs);
         
-        await controller.initialize();
-        
-        // entry chunk is loaded foreground, prefetch should start A and B
-        await new Promise(r => setTimeout(r, 100)); // allow prefetch to complete
-        
-        const status = controller.getStatus();
-        
-        // loaded: entry (1), A (1), B (1)
-        expect(status.loadedChunkCount).toBe(3);
-        
-        // Verify C wasn't fetched (not preloaded, not a dependency)
-        expect(fetchMock).not.toHaveBeenCalledWith('https://cdn.example.com/c.bin', expect.anything());
-        
-        await controller.dispose();
+        try {
+            await controller.initialize();
+
+            // Entry is foreground work, while A and its dependency B are
+            // intentionally scheduled in the background. Synchronize on the
+            // observable completion condition instead of guessing a wall-clock
+            // delay that becomes flaky when workspace tests run concurrently.
+            await vi.waitFor(() => {
+                expect(controller.getStatus().loadedChunkCount).toBe(3);
+            }, { timeout: 2_000, interval: 10 });
+
+            // Verify C wasn't fetched (not preloaded, not a dependency)
+            expect(fetchMock).not.toHaveBeenCalledWith('https://cdn.example.com/c.bin', expect.anything());
+        } finally {
+            await controller.dispose();
+        }
     });
 });

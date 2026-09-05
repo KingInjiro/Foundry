@@ -1,10 +1,24 @@
 export class DatabaseProvider {
     async getUser(uid) { throw new Error("Not implemented"); }
     async createUser(user) { throw new Error("Not implemented"); }
+    async provisionUserRole(data) { throw new Error("Not implemented"); }
+    async getLocalCredentialByUsername(usernameNormalized) { throw new Error("Not implemented"); }
+    async getLocalCredentialByUid(uid) { throw new Error("Not implemented"); }
+    async createLocalAccount(account) { throw new Error("Not implemented"); }
+    async updateLocalPassword(uid, passwordHash, now) { throw new Error("Not implemented"); }
+    async setLocalUserDisabled(uid, disabled, now) { throw new Error("Not implemented"); }
+    async createLocalSession(session) { throw new Error("Not implemented"); }
+    async getLocalSession(tokenHash) { throw new Error("Not implemented"); }
+    async touchLocalSession(tokenHash, lastSeenAt) { throw new Error("Not implemented"); }
+    async revokeLocalSession(tokenHash, revokedAt) { throw new Error("Not implemented"); }
+    async revokeAllLocalSessions(uid, revokedAt) { throw new Error("Not implemented"); }
+    async deleteExpiredLocalSessions(now) { throw new Error("Not implemented"); }
+    async getLatestMigration() { throw new Error("Not implemented"); }
     async getGame(id) { throw new Error("Not implemented"); }
     async createGame(game) { throw new Error("Not implemented"); }
     async updateGameMetadata(id, metadata) { throw new Error("Not implemented"); }
     async updateGameState(id, currentState) { throw new Error("Not implemented"); }
+    async updateGameModerationState(id, moderationState) { throw new Error("Not implemented"); }
     async listGames() { throw new Error("Not implemented"); }
     async createGameVersion(version) { throw new Error("Not implemented"); }
     async getGameVersions(gameId) { throw new Error("Not implemented"); }
@@ -23,6 +37,14 @@ export class DatabaseProvider {
     async searchPublishedCatalog(options) { throw new Error("Not implemented"); }
     async listPublishedCatalogTags(options) { throw new Error("Not implemented"); }
     async ping() { throw new Error("Not implemented"); }
+    async createGameReport(report) { throw new Error("Not implemented"); }
+    async getGameReport(id) { throw new Error("Not implemented"); }
+    async listGameReports(gameId, status) { throw new Error("Not implemented"); }
+    async listModerationReports(status, limit) { throw new Error("Not implemented"); }
+    async countOpenGameReports() { throw new Error("Not implemented"); }
+    async resolveGameReport(id, data) { throw new Error("Not implemented"); }
+    async createModerationAction(action) { throw new Error("Not implemented"); }
+    async listModerationActions(gameId) { throw new Error("Not implemented"); }
 
     async getUserQuotaUsage(uid) { throw new Error("Not implemented"); }
     async updateUploadSession(id, data) { throw new Error("Not implemented"); }
@@ -59,4 +81,5 @@ export class DatabaseProvider {
     async getUploadSessionByVersionId(versionId) { throw new Error("Not implemented"); }
     async consumeRateLimit(identity, operation, config, now) { throw new Error("Not implemented"); }
     async getJobQueueStats() { throw new Error("Not implemented"); }
+    async getStorageIntegritySnapshot() { throw new Error("Not implemented"); }
 }

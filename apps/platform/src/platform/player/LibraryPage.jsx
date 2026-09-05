@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { Bookmark, Clock3, Gamepad2, Play, RefreshCw, UserMinus, Users, X } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext.jsx';
 import { dismissRecentGame, loadLibraryCollections, removeSavedGame, unfollowDeveloper } from './libraryData.js';
@@ -144,14 +144,14 @@ export function LibraryPage() {
                             <div className="grid md:grid-cols-2 gap-4">
                                 {recent.map(game => <GameTile key={game.gameId} game={game} subtitle={game.lastPlayedAt ? `Last played ${new Date(game.lastPlayedAt).toLocaleString()}` : game.developer} onRemove={() => dismissRecent(game)} removeLabel="Hide from Continue Playing" actionBusy={Boolean(actionBusy)} />)}
                             </div>
-                        ) : <p className="text-neutral-500">Games you play while signed in will appear here.</p>}
+                        ) : <p className="text-neutral-500">Games you play while signed in will appear here. <Link to="/player" className="font-medium text-blue-400 hover:text-blue-300">Browse games</Link></p>}
                     </section>
 
                     <section>
                         <div className="flex items-center gap-2 mb-5"><Bookmark className="w-5 h-5 text-green-400" /><h2 className="text-2xl font-bold">Saved Games</h2></div>
                         {saved.length ? (
                             <div className="grid md:grid-cols-2 gap-4">{saved.map(game => <GameTile key={game.gameId} game={game} onRemove={() => removeSaved(game)} removeLabel="Remove from Saved Games" actionBusy={Boolean(actionBusy)} />)}</div>
-                        ) : <p className="text-neutral-500">Use “Keep” on a game you want to return to.</p>}
+                        ) : <p className="text-neutral-500">Use “Keep” on a game you want to return to. <Link to="/player" className="font-medium text-blue-400 hover:text-blue-300">Browse games</Link></p>}
                     </section>
 
                     <section>
@@ -164,7 +164,7 @@ export function LibraryPage() {
                                     </button>
                                 ))}
                             </div>
-                        ) : <p className="text-neutral-500 mb-5">Follow a developer from a game page to see their future published games here.</p>}
+                        ) : <p className="text-neutral-500 mb-5">Follow a developer from a game page to see their future published games here. <Link to="/player" className="font-medium text-blue-400 hover:text-blue-300">Browse games</Link></p>}
                         {following.games?.length > 0 && <div className="grid md:grid-cols-2 gap-4">{following.games.map(game => <GameTile key={game.gameId} game={game} />)}</div>}
                     </section>
                     </div>

@@ -27,7 +27,10 @@ describe('gated direct asset delivery', () => {
         await db.updateGameVersionMetadata('direct-version', { runtimeUrl: '/api/cdn/games/direct-game/versions/direct-version/extracted' });
     });
 
-    afterEach(() => db.db.close());
+    afterEach(async () => {
+        await app?.locals?.jobQueue?.stop?.();
+        await db.close();
+    });
 
     it('redirects non-document assets to a short-lived signed R2 URL after publication checks', async () => {
         const response = await request(app).get('/api/cdn/games/direct-game/versions/direct-version/extracted/world.glb');
@@ -42,6 +45,7 @@ describe('gated direct asset delivery', () => {
         const response = await request(app).get('/api/cdn/games/direct-game/versions/direct-version/extracted/index.html');
         expect(response.status).toBe(200);
         expect(response.headers['content-security-policy']).toContain('sandbox allow-scripts');
+        expect(response.headers['cache-control']).toBe('public, no-cache');
         expect(storage.createDownloadUrl).not.toHaveBeenCalled();
         expect(storage.getDownloadStream).toHaveBeenCalledOnce();
     });
