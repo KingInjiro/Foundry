@@ -136,6 +136,25 @@ set -Eeuo pipefail
 exec ${JSON.stringify(curlBinary)} "$@"
 `);
 executable(path.join(bin, 'chown'), '#!/usr/bin/env bash\nexit 0\n');
+executable(path.join(bin, 'stat'), [
+    '#!/usr/bin/env bash',
+    'set -Eeuo pipefail',
+    'if [[ "${1:-}" == "-c" && "${2:-}" == "%u:%G:%a" && ( "${3:-}" == "${FOUNDRY_INSTALL_ROOT}" || "${3:-}" == "${FOUNDRY_INSTALL_ROOT}/releases" ) ]]; then',
+    '    printf \'0:%s:750\\n\' "${FOUNDRY_SERVICE_GROUP}"',
+    '    exit 0',
+    'fi',
+    'exec /usr/bin/stat "$@"',
+    ''
+].join('\n'));
+executable(path.join(bin, 'find'), [
+    '#!/usr/bin/env bash',
+    'set -Eeuo pipefail',
+    'for arg in "$@"; do',
+    '    if [[ "$arg" == "-user" || "$arg" == "-group" ]]; then exit 0; fi',
+    'done',
+    'exec /usr/bin/find "$@"',
+    ''
+].join('\n'));
 
 const started = process.hrtime.bigint();
 const rehearsalEnv = {
