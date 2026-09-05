@@ -1,7 +1,0 @@
-{
-    "format": "foundry-game",
-    "version": 1,
-    "runtime": "foundry",
-    "entry": "game.js",
-    "name": "Test Foundry Game"
-}

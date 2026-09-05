@@ -194,7 +194,7 @@ export function ProjectManager() {
     };
 
     if (loading) return <div className="flex-1 p-8 flex items-center justify-center text-neutral-400" role="status"><LoaderCircle className="w-5 h-5 animate-spin mr-2" />Loading project…</div>;
-    if (error) return <div className="flex-1 p-8 flex items-center justify-center"><div className="text-center"><p className="text-red-400 mb-4">{error}</p><button type="button" onClick={() => fetchData()} className="bg-neutral-800 hover:bg-neutral-700 px-4 py-2 rounded-lg font-bold">Try Again</button></div></div>;
+    if (error) return <main id="main-content" className="flex-1 p-6 sm:p-8 flex items-center justify-center"><div className="w-full max-w-lg rounded-2xl border border-red-500/20 bg-red-500/5 p-6 text-center" role="alert"><h2 className="text-xl font-bold text-red-300">Project unavailable</h2><p className="mt-2 text-sm text-neutral-400">{error}</p><div className="mt-5 flex flex-col-reverse sm:flex-row justify-center gap-3"><Link to="/developer" className="inline-flex items-center justify-center gap-2 rounded-lg bg-neutral-800 px-4 py-2 font-bold hover:bg-neutral-700"><ArrowLeft className="w-4 h-4" />Back to Developer Dashboard</Link><button type="button" onClick={() => fetchData()} className="rounded-lg bg-blue-600 px-4 py-2 font-bold hover:bg-blue-500">Try Again</button></div></div></main>;
     if (!game) return <div className="p-8 text-neutral-400">Project not found.</div>;
 
     return (
@@ -204,11 +204,11 @@ export function ProjectManager() {
                     <Link to="/developer" className="p-2 hover:bg-neutral-800 rounded-lg transition-colors shrink-0" aria-label="Back to dashboard"><ArrowLeft className="w-5 h-5 text-neutral-400" /></Link>
                     <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-3">
-                            <h2 className="text-3xl font-extrabold truncate">{game.title}</h2>
+                            <h2 className="max-w-full min-w-0 text-3xl font-extrabold [overflow-wrap:anywhere]">{game.title}</h2>
                             <span className={`text-sm px-2 py-0.5 rounded border ${activeVersion ? 'bg-green-500/10 text-green-300 border-green-500/20' : 'bg-neutral-800 text-neutral-400 border-neutral-700'}`}>{activeVersion ? 'Published' : 'Draft'}</span>
                         </div>
                         <p className="text-neutral-500 mt-1 text-sm font-mono truncate" title={id}>{id}</p>
-                        {!editingDetails && <p className="text-neutral-400 mt-2 max-w-2xl">{game.description || 'No project description yet.'}</p>}
+                        {!editingDetails && <p className="text-neutral-400 mt-2 max-w-2xl whitespace-pre-wrap [overflow-wrap:anywhere]">{game.description || 'No project description yet.'}</p>}
                     </div>
                 </div>
                 <div className="flex flex-col sm:flex-row gap-2">

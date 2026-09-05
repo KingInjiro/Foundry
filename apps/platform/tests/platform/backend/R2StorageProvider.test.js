@@ -68,6 +68,26 @@ describe('R2StorageProvider', () => {
         expect(deleteCommands[1].input.Delete.Objects).toEqual([{ Key: 'prefix/c.js' }]);
     });
 
+    it('lists a paginated prefix without mutating storage', async () => {
+        const provider = Object.create(R2StorageProvider.prototype);
+        provider.isConfigured = true;
+        provider.bucketName = 'games';
+        let page = 0;
+        provider.client = { send: vi.fn(async command => {
+            expect(command).toBeInstanceOf(ListObjectsV2Command);
+            page += 1;
+            return page === 1
+                ? { Contents: [{ Key: 'games/a', Size: 3, ETag: 'a' }], IsTruncated: true, NextContinuationToken: 'next' }
+                : { Contents: [{ Key: 'games/b', Size: 4, ETag: 'b' }], IsTruncated: false };
+        }) };
+
+        await expect(provider.listObjects('games/')).resolves.toEqual([
+            expect.objectContaining({ key: 'games/a', size: 3, etag: 'a' }),
+            expect.objectContaining({ key: 'games/b', size: 4, etag: 'b' })
+        ]);
+        expect(provider.client.send.mock.calls[1][0].input.ContinuationToken).toBe('next');
+    });
+
     it('refuses prefix deletion when R2 is not configured', async () => {
         const provider = Object.create(R2StorageProvider.prototype);
         provider.isConfigured = false;

@@ -6,6 +6,7 @@
   "exports": {
     ".": "./src/foundry-loader.js",
     "./sandbox": "./src/sandbox.jsx",
+    "./generic-sandbox": "./src/genericSandbox.js",
     "./sandboxProtocol": "./src/sandboxProtocol.js",
     "./worker": "./src/worker.js",
     "./streaming/*": "./src/streaming/*.ts",

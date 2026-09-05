@@ -1,0 +1,33 @@
+[Unit]
+Description=Foundry single-host Platform
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=foundry
+Group=foundry
+WorkingDirectory=/opt/foundry/current/apps/platform
+EnvironmentFile=/etc/foundry/foundry.env
+ExecStart=@NODE_BINARY@ /opt/foundry/current/apps/platform/dist/server.cjs
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=45
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/var/lib/foundry
+
+[Install]
+WantedBy=multi-user.target

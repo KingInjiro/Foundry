@@ -3,6 +3,7 @@ import { defineConfig, devices } from '@playwright/test';
 
 export default defineConfig({
   testDir: './e2e',
+  testIgnore: 'single-host.spec.js',
   timeout: 60000,
   expect: {
     timeout: 10000

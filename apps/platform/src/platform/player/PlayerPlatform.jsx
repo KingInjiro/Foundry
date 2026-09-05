@@ -1,5 +1,5 @@
 import React, { lazy, Suspense } from 'react';
-import { Routes, Route, Link, useLocation } from 'react-router-dom';
+import { Routes, Route, Link, Navigate, useLocation } from 'react-router-dom';
 import { Gamepad2, ChevronLeft, Library, Wrench } from 'lucide-react';
 import { GameCatalog } from './GameCatalog.jsx';
 import { GameDetails } from './GameDetails.jsx';
@@ -48,6 +48,7 @@ export function PlayerPlatform() {
                     <Route path="/game/:id" element={<GameDetails />} />
                     <Route path="/game/:id/play" element={<GamePlayer />} />
                     <Route path="/library" element={<LibraryPage />} />
+                    <Route path="*" element={<Navigate to="/player" replace />} />
                 </Routes>
             </Suspense>
         </div>

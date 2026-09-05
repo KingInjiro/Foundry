@@ -86,8 +86,14 @@ export class WebGameRuntimeAdapter extends GameRuntimeAdapter {
         const policy = createSandboxPolicy('web', manifest.capabilities);
         return {
             type: 'web',
-            entryUrl: joinRuntimeUrl(storageRef.location, manifest.entry || 'index.html'),
-            ...policy
+            entryUrl: '/generic-sandbox.html',
+            gameUrl: joinRuntimeUrl(storageRef.location, manifest.entry || 'index.html'),
+            ...policy,
+            // The outer frame contains only the trusted Platform loader and
+            // must load the Platform's module under strict CORS/COEP headers.
+            // The actual game is created by that loader as a nested iframe
+            // which deliberately remains opaque (no allow-same-origin).
+            sandboxAttributes: `${policy.sandboxAttributes} allow-same-origin`
         };
     }
 }

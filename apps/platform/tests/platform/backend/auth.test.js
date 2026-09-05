@@ -13,7 +13,10 @@ describe('Authentication & Authorization', () => {
         app = createApp(db);
     });
 
-    afterAll(() => db.db.close());
+    afterAll(async () => {
+        await app?.locals?.jobQueue?.stop?.();
+        await db.close();
+    });
 
     it('AUTH-001: Public endpoints allow unauthenticated access', async () => {
         const res = await request(app).get('/api/catalog/games');

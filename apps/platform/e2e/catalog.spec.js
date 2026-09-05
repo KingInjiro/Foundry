@@ -23,15 +23,15 @@ test.describe('Catalog Visibility', () => {
     await page.getByRole('button', { name: 'Upload Version' }).click();
     await expect(page.getByText('Version uploaded')).toBeVisible();
     await page.getByRole('button', { name: 'Manage & Publish' }).click();
-    await expect(page.locator('text=Ready')).toBeVisible(); // Not active yet
+    await expect(page.getByText('READY', { exact: true })).toBeVisible(); // Not active yet
     
     const url = page.url();
     const projectId = url.split('/').pop();
 
     // 2. Switch to Player
-    await page.evaluate(() => {
-      window.localStorage.setItem('E2E_MOCK_USER_ID', 'player-user');
-      window.localStorage.setItem('E2E_MOCK_USER', JSON.stringify({ uid: 'player-user', email: 'player@foundry.test' }));
+    await context.addInitScript(() => {
+        window.localStorage.setItem('E2E_MOCK_USER_ID', 'player-user');
+        window.localStorage.setItem('E2E_MOCK_USER', JSON.stringify({ uid: 'player-user', email: 'player@foundry.test' }));
     });
     
     // 3. Check Catalog
@@ -41,6 +41,6 @@ test.describe('Catalog Visibility', () => {
 
     // 4. Try direct access
     await page.goto(`/player/game/${projectId}`);
-    await expect(page.locator('text=Game not found')).toBeVisible();
+    await expect(page.getByText('Game is not published', { exact: true })).toBeVisible();
   });
 });

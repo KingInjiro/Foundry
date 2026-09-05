@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@source "../../../packages/engine/src/editor";
 
 @media (prefers-reduced-motion: reduce) {
     *,

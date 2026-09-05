@@ -23,22 +23,24 @@ test.describe('Sandbox Security', () => {
     await page.getByRole('button', { name: 'Upload Version' }).click();
     await expect(page.getByText('Version uploaded')).toBeVisible();
     await page.getByRole('button', { name: 'Manage & Publish' }).click();
-    await expect(page.locator('text=Ready')).toBeVisible();
+    await expect(page.getByText('READY', { exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Publish' }).click();
     await expect(page.getByText('Active')).toBeVisible();
 
     // Play the game
     await page.goto('/player');
-    await page.getByRole('button', { name: 'Play Generic E2E' }).click();
+    await page.locator('#all-games').getByRole('button', { name: 'Play Generic E2E' }).click();
 
-    // Verify iframe sandbox attributes
-    const iframe = page.locator('iframe');
-    const sandboxAttr = await iframe.getAttribute('sandbox');
-    expect(sandboxAttr).toContain('allow-scripts');
-    expect(sandboxAttr).not.toContain('allow-same-origin');
+    // The outer iframe is a trusted same-origin Platform loader. The actual
+    // game is one level deeper and must remain an opaque-origin sandbox.
+    const loaderFrame = page.locator('iframe[title^="Game "]');
+    await expect(loaderFrame).toHaveAttribute('sandbox', /allow-same-origin/);
+    const gameFrame = page.frameLocator('iframe[title^="Game "]').locator('iframe[title="Published web game"]');
+    await expect(gameFrame).toHaveAttribute('sandbox', /allow-scripts/);
+    await expect(gameFrame).not.toHaveAttribute('sandbox', /allow-same-origin/);
 
     // Verify it rendered
-    const frame = page.frameLocator('iframe');
+    const frame = page.frameLocator('iframe').frameLocator('iframe');
     await expect(frame.locator('[data-testid="generic-game-ready"]')).toHaveText('GENERIC E2E GAME READY');
   });
 });

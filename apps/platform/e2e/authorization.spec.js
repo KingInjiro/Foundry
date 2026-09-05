@@ -23,20 +23,20 @@ test.describe('Authorization Isolation', () => {
     await page.getByRole('button', { name: 'Upload Version' }).click();
     await expect(page.getByText('Version uploaded')).toBeVisible();
     await page.getByRole('button', { name: 'Manage & Publish' }).click();
-    await expect(page.locator('text=Ready')).toBeVisible();
+    await expect(page.getByText('READY', { exact: true })).toBeVisible();
     
     const url = page.url();
     const projectId = url.split('/').pop();
 
     // 2. Switch to Dev B
-    await page.evaluate(() => {
-      window.localStorage.setItem('E2E_MOCK_USER_ID', 'dev-user-b');
-      window.localStorage.setItem('E2E_MOCK_USER', JSON.stringify({ uid: 'dev-user-b', email: 'dev-b@foundry.test' }));
+    await context.addInitScript(() => {
+        window.localStorage.setItem('E2E_MOCK_USER_ID', 'dev-user-b');
+        window.localStorage.setItem('E2E_MOCK_USER', JSON.stringify({ uid: 'dev-user-b', email: 'dev-b@foundry.test' }));
     });
     
     // 3. Dev B tries to open Dev A's project UI
     await page.goto(`/developer/project/${projectId}`);
-    await expect(page.getByText('Not authorized')).toBeVisible();
+    await expect(page.getByText('Not authorized', { exact: true })).toBeVisible();
 
     // 4. Dev B tries to access via API
     const response = await request.get(`/api/games/${projectId}`, {

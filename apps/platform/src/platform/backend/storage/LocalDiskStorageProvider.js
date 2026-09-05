@@ -1,17 +1,25 @@
 import fs from 'fs';
 import path from 'path';
+import crypto from 'node:crypto';
 import { StorageProvider } from './StorageProvider.js';
 
 export class LocalDiskStorageProvider extends StorageProvider {
-    constructor(basePath = '.e2e/storage', uploadRoute = '/api/test-storage/upload') {
+    constructor(basePath = '.e2e/storage', uploadRoute = '/api/test-storage/upload', options = {}) {
         super();
         this.kind = 'local-disk';
         this.basePath = path.resolve(basePath);
         this.uploadRoute = uploadRoute;
+        this.uploadSigningSecret = typeof options.uploadSigningSecret === 'string' ? options.uploadSigningSecret : null;
+        this.uploadUrlTtlSeconds = Math.max(60, Math.min(Number(options.uploadUrlTtlSeconds) || 900, 3600));
+        this.publicOrigin = options.publicOrigin ? new URL(options.publicOrigin).origin : null;
+        this.now = typeof options.now === 'function' ? options.now : () => Date.now();
+        this.directDownloadsEnabled = false;
         this.isConfigured = true;
         if (!fs.existsSync(this.basePath)) {
-            fs.mkdirSync(this.basePath, { recursive: true });
+            fs.mkdirSync(this.basePath, { recursive: true, mode: 0o750 });
         }
+        this.tempPath = path.join(this.basePath, '.tmp');
+        fs.mkdirSync(this.tempPath, { recursive: true, mode: 0o750 });
     }
 
     resolveObjectPath(objectKey) {
@@ -40,9 +48,44 @@ export class LocalDiskStorageProvider extends StorageProvider {
 
     async createUploadSession(objectKey, contentType = 'application/zip') {
         this.resolveObjectPath(objectKey);
+        if (this.uploadSigningSecret) {
+            const expires = Math.floor(this.now() / 1000) + this.uploadUrlTtlSeconds;
+            const signature = this.signUpload(objectKey, contentType, expires);
+            const query = new URLSearchParams({ key: objectKey, contentType, expires: String(expires), signature });
+            return { uploadUrl: `${this.uploadRoute}?${query}` };
+        }
         const port = process.env.PORT || 3000;
         const url = `http://localhost:${port}${this.uploadRoute}?key=${encodeURIComponent(objectKey)}`;
         return { uploadUrl: url };
+    }
+
+    signUpload(objectKey, contentType, expires) {
+        if (!this.uploadSigningSecret) throw new Error('Local storage upload signing is not configured.');
+        return crypto.createHmac('sha256', this.uploadSigningSecret)
+            .update('foundry-local-upload-v1\0', 'utf8')
+            .update(objectKey, 'utf8')
+            .update('\0', 'utf8')
+            .update(contentType, 'utf8')
+            .update('\0', 'utf8')
+            .update(String(expires), 'utf8')
+            .digest('base64url');
+    }
+
+    verifyUploadRequest({ objectKey, contentType = 'application/zip', expires, signature }) {
+        this.resolveObjectPath(objectKey);
+        if (!this.uploadSigningSecret) return true;
+        const parsedExpires = Number(expires);
+        const nowSeconds = Math.floor(this.now() / 1000);
+        if (
+            !Number.isSafeInteger(parsedExpires)
+            || parsedExpires < nowSeconds
+            || parsedExpires > nowSeconds + this.uploadUrlTtlSeconds + 30
+            || typeof signature !== 'string'
+        ) return false;
+        const expected = this.signUpload(objectKey, contentType, parsedExpires);
+        const actualBuffer = Buffer.from(signature, 'utf8');
+        const expectedBuffer = Buffer.from(expected, 'utf8');
+        return actualBuffer.length === expectedBuffer.length && crypto.timingSafeEqual(actualBuffer, expectedBuffer);
     }
 
     async ping() {
@@ -79,9 +122,26 @@ export class LocalDiskStorageProvider extends StorageProvider {
         const filePath = this.resolveObjectPath(objectKey);
         const dir = path.dirname(filePath);
         if (!fs.existsSync(dir)) {
-            fs.mkdirSync(dir, { recursive: true });
+            fs.mkdirSync(dir, { recursive: true, mode: 0o750 });
         }
-        fs.writeFileSync(filePath, buffer);
+        // The E2E reset path and an operator cleanup may remove an empty temp
+        // directory after provider construction. Re-establish it for every
+        // atomic write; completed objects still publish only via rename.
+        await fs.promises.mkdir(this.tempPath, { recursive: true, mode: 0o750 });
+        const temporaryPath = path.join(this.tempPath, `${crypto.randomUUID()}.partial`);
+        let handle;
+        try {
+            handle = await fs.promises.open(temporaryPath, 'wx', 0o600);
+            await handle.writeFile(buffer);
+            await handle.sync();
+            await handle.close();
+            handle = null;
+            await fs.promises.rename(temporaryPath, filePath);
+        } catch (error) {
+            await handle?.close().catch(() => {});
+            await fs.promises.rm(temporaryPath, { force: true }).catch(() => {});
+            throw error;
+        }
     }
 
     async deleteObject(objectKey) {
@@ -96,5 +156,24 @@ export class LocalDiskStorageProvider extends StorageProvider {
         if (fs.existsSync(dirPath)) {
             fs.rmSync(dirPath, { recursive: true, force: true });
         }
+    }
+
+    async listObjects(prefix) {
+        const normalizedPrefix = String(prefix || '').replace(/\/+$/, '');
+        const root = this.resolveObjectPath(normalizedPrefix);
+        if (!fs.existsSync(root)) return [];
+        const objects = [];
+        const visit = currentPath => {
+            const stat = fs.lstatSync(currentPath);
+            if (stat.isSymbolicLink()) throw new Error('Unsafe symbolic link found in local object storage.');
+            if (stat.isDirectory()) {
+                for (const entry of fs.readdirSync(currentPath)) visit(path.join(currentPath, entry));
+                return;
+            }
+            const key = path.relative(this.basePath, currentPath).split(path.sep).join('/');
+            objects.push({ key, size: stat.size, lastModified: stat.mtime, etag: `W/"${stat.size.toString(16)}-${Math.trunc(stat.mtimeMs).toString(16)}"` });
+        };
+        visit(root);
+        return objects.sort((a, b) => a.key.localeCompare(b.key));
     }
 }

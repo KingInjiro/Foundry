@@ -3,15 +3,6 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    
-    <script>
-      window.addEventListener('error', function(e) {
-        if (e.message && (e.message.includes('ResizeObserver loop') || e.message.includes('ResizeObserver loop completed with undelivered notifications.'))) {
-          e.stopImmediatePropagation();
-          e.preventDefault();
-        }
-      });
-    </script>
 <title>Sandbox</title>
   </head>
   <body style="margin: 0; padding: 0; overflow: hidden; background: #000; display: flex; flex-direction: column; height: 100vh;">

@@ -49,7 +49,7 @@ test.describe('Streaming Wiring E2E', () => {
     await page.getByRole('button', { name: 'Upload Version' }).click();
     await expect(page.getByText('Version uploaded')).toBeVisible({ timeout: 10000 });
     await page.getByRole('button', { name: 'Manage & Publish' }).click();
-    await expect(page.locator('text=Ready')).toBeVisible();
+    await expect(page.getByText('READY', { exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Publish' }).click();
     await expect(page.getByText('Active')).toBeVisible();
 

@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_DIRECTORY="$(cd -- "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source=common.sh
+source "${SCRIPT_DIRECTORY}/common.sh"
+
+COMMAND="${1:-help}"
+shift || true
+
+case "${COMMAND}" in
+    update)
+        foundry_require_root
+        exec "${SCRIPT_DIRECTORY}/update.sh" "$@"
+        ;;
+    configure-deploy-user)
+        foundry_require_root
+        exec "${SCRIPT_DIRECTORY}/configure-deploy-user.sh" "$@"
+        ;;
+    rollback)
+        foundry_require_root
+        exec "${SCRIPT_DIRECTORY}/rollback.sh" "$@"
+        ;;
+    status)
+        systemctl status "${FOUNDRY_SERVICE_NAME}" --no-pager
+        ;;
+    logs)
+        exec journalctl -u "${FOUNDRY_SERVICE_NAME}" -n "${1:-200}" --no-pager
+        ;;
+    doctor)
+        foundry_require_root
+        foundry_load_environment
+        foundry_require_current_release
+        RELEASE="${FOUNDRY_CURRENT_RELEASE}"
+        exec runuser --preserve-environment --user "${FOUNDRY_SERVICE_USER}" -- \
+            env --chdir="${RELEASE}/apps/platform" \
+            node "${RELEASE}/apps/platform/scripts/single-host-doctor.mjs" "$@"
+        ;;
+    backup)
+        foundry_require_root
+        foundry_load_environment
+        foundry_require_current_release
+        RELEASE="${FOUNDRY_CURRENT_RELEASE}"
+        WAS_ACTIVE=false
+        if systemctl is-active --quiet "${FOUNDRY_SERVICE_NAME}"; then
+            WAS_ACTIVE=true
+            systemctl stop "${FOUNDRY_SERVICE_NAME}"
+        fi
+        restart_after_backup() {
+            if [[ "${WAS_ACTIVE}" == true ]]; then systemctl start "${FOUNDRY_SERVICE_NAME}" || true; fi
+        }
+        trap restart_after_backup EXIT
+        foundry_run_as_service env FOUNDRY_RELEASE_ID="$(basename "${RELEASE}")" \
+            node "${RELEASE}/apps/platform/scripts/single-host-backup.mjs" \
+            --confirm-service-stopped "$@"
+        if [[ "${WAS_ACTIVE}" == true ]]; then
+            systemctl start "${FOUNDRY_SERVICE_NAME}"
+            foundry_wait_ready 60 || foundry_fail "backup completed, but the service did not recover readiness."
+        fi
+        trap - EXIT
+        ;;
+    rehearse)
+        foundry_require_root
+        foundry_load_environment
+        [[ "${1:-}" == "--backup" && -n "${2:-}" ]] || foundry_fail "usage: foundry rehearse --backup /absolute/backup-directory"
+        foundry_require_current_release
+        RELEASE="${FOUNDRY_CURRENT_RELEASE}"
+        foundry_run_as_service node "${RELEASE}/apps/platform/scripts/single-host-rehearsal.mjs" "$@"
+        ;;
+    restore)
+        foundry_require_root
+        foundry_load_environment
+        foundry_require_current_release
+        RELEASE="${FOUNDRY_CURRENT_RELEASE}"
+        foundry_run_as_service node "${RELEASE}/apps/platform/scripts/single-host-restore.mjs" "$@"
+        ;;
+    storage-check)
+        foundry_require_root
+        foundry_load_environment
+        foundry_require_current_release
+        RELEASE="${FOUNDRY_CURRENT_RELEASE}"
+        foundry_run_as_service node "${RELEASE}/apps/platform/scripts/check-storage-integrity.mjs" "$@"
+        ;;
+    create-user|reset-password|disable-user|enable-user)
+        foundry_require_root
+        foundry_load_environment
+        foundry_require_current_release
+        RELEASE="${FOUNDRY_CURRENT_RELEASE}"
+        exec runuser --preserve-environment --user "${FOUNDRY_SERVICE_USER}" -- \
+            node "${RELEASE}/apps/platform/scripts/local-user.mjs" "${COMMAND}" \
+            --db "${PLATFORM_DB_PATH}" "$@"
+        ;;
+    help|--help|-h)
+        cat <<'USAGE'
+Usage: foundry <command> [options]
+
+  status                         Show systemd service status
+  logs [lines]                   Show recent structured service logs
+  doctor [--verify-backup]       Check runtime, disk, DB, objects, release, backup, service
+  backup [--output PATH]         Stop/drain, snapshot DB + objects, restart
+  rehearse --backup PATH         Restore and boot an isolated backup rehearsal
+  restore --backup P --target P --confirm-new-target
+                                 Restore only into a new data directory
+  create-user ... --password-stdin
+  reset-password ... --password-stdin
+  disable-user ...
+  enable-user ...
+  update /tmp/Foundry.zip        Verify prebuilt release, backup, atomically deploy, readiness/rollback
+  configure-deploy-user USER     Authorize one fixed-path CI deployment command
+  rollback [--release ID]        Guard DB compatibility and switch application release
+USAGE
+        ;;
+    *)
+        foundry_fail "unknown command: ${COMMAND}; run 'foundry help'."
+        ;;
+esac

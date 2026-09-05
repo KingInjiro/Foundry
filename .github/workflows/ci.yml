@@ -1,0 +1,191 @@
+name: Foundry CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CI: 'true'
+      FOUNDRY_DEPLOYMENT_MODE: 'cloud'
+      VITE_FIREBASE_API_KEY: 'ci-public-firebase-key'
+      VITE_FIREBASE_AUTH_DOMAIN: 'foundry-ci.firebaseapp.com'
+      VITE_FIREBASE_PROJECT_ID: 'foundry-ci-12345'
+      VITE_FIREBASE_APP_ID: '1:000000000000:web:ci'
+      VITE_FIREBASE_STORAGE_BUCKET: 'foundry-ci.firebasestorage.app'
+      VITE_FIREBASE_MESSAGING_SENDER_ID: '000000000000'
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Reject high or critical dependency vulnerabilities
+        run: npm audit --audit-level=high
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Static checks, unit tests, and production build
+        run: npm run check
+
+      - name: Compiled production lifecycle smoke
+        run: npm run test:smoke
+
+      - name: Browser end-to-end tests
+        run: npm run test:e2e
+
+      - name: Upload Playwright diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-diagnostics
+          path: |
+            apps/platform/playwright-report
+            apps/platform/test-results
+          if-no-files-found: ignore
+          retention-days: 7
+
+  package-single-host:
+    needs: verify
+    if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CI: 'true'
+      FOUNDRY_DEPLOYMENT_MODE: 'single-host'
+      RELEASE_BASENAME: Foundry-single-host-${{ github.sha }}.zip
+    steps:
+      - name: Check out verified source
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Single-host Chromium and recovery gate
+        run: npm run test:e2e:single-host
+
+      - name: Verify and smoke the single-host production artifact
+        run: |
+          npm run verify:artifact
+          npm run test:smoke
+
+      - name: Create and rehearse the prebuilt release
+        run: |
+          release_path="${RUNNER_TEMP}/${RELEASE_BASENAME}"
+          npm run release:single-host -- --output "${release_path}"
+          unzip -t "${release_path}"
+          npm run rehearse:single-host-release -- --archive "${release_path}"
+          cd "${RUNNER_TEMP}"
+          sha256sum "${RELEASE_BASENAME}" > "${RELEASE_BASENAME}.sha256"
+
+      - name: Publish the verified deployment artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: foundry-single-host-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/${{ env.RELEASE_BASENAME }}
+            ${{ runner.temp }}/${{ env.RELEASE_BASENAME }}.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  deploy-single-host:
+    needs: package-single-host
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    concurrency:
+      group: foundry-single-host-production
+      cancel-in-progress: false
+    env:
+      RELEASE_BASENAME: Foundry-single-host-${{ github.sha }}.zip
+      DEPLOY_HOST: ${{ vars.FOUNDRY_DEPLOY_HOST }}
+      DEPLOY_USER: ${{ vars.FOUNDRY_DEPLOY_USER }}
+      PUBLIC_URL: ${{ vars.FOUNDRY_PUBLIC_URL }}
+      SSH_PRIVATE_KEY: ${{ secrets.FOUNDRY_DEPLOY_SSH_KEY }}
+      SSH_HOST_KEY: ${{ secrets.FOUNDRY_DEPLOY_HOST_KEY }}
+    steps:
+      - name: Download the verified deployment artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: foundry-single-host-${{ github.sha }}
+          path: ${{ runner.temp }}/release
+
+      - name: Configure pinned SSH trust
+        run: |
+          : "${DEPLOY_HOST:?Set the production environment variable FOUNDRY_DEPLOY_HOST}"
+          : "${DEPLOY_USER:?Set the production environment variable FOUNDRY_DEPLOY_USER}"
+          : "${PUBLIC_URL:?Set the production environment variable FOUNDRY_PUBLIC_URL}"
+          : "${SSH_PRIVATE_KEY:?Set the production secret FOUNDRY_DEPLOY_SSH_KEY}"
+          : "${SSH_HOST_KEY:?Set the production secret FOUNDRY_DEPLOY_HOST_KEY}"
+          case "${PUBLIC_URL}" in https://*) ;; *) echo 'FOUNDRY_PUBLIC_URL must use HTTPS.' >&2; exit 1 ;; esac
+          install -d -m 0700 "${RUNNER_TEMP}/foundry-ssh"
+          printf '%s\n' "${SSH_PRIVATE_KEY}" > "${RUNNER_TEMP}/foundry-ssh/id"
+          printf '%s\n' "${SSH_HOST_KEY}" > "${RUNNER_TEMP}/foundry-ssh/known_hosts"
+          chmod 0600 "${RUNNER_TEMP}/foundry-ssh/id" "${RUNNER_TEMP}/foundry-ssh/known_hosts"
+
+      - name: Transfer, verify, and atomically update Foundry
+        run: |
+          ssh_options=(
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o "UserKnownHostsFile=${RUNNER_TEMP}/foundry-ssh/known_hosts"
+            -i "${RUNNER_TEMP}/foundry-ssh/id"
+          )
+          remote="${DEPLOY_USER}@${DEPLOY_HOST}"
+          ssh "${ssh_options[@]}" "${remote}" 'install -d -m 0700 "$HOME/.foundry-deploy"'
+          scp "${ssh_options[@]}" \
+            "${RUNNER_TEMP}/release/${RELEASE_BASENAME}" \
+            "${remote}:.foundry-deploy/Foundry-single-host.zip.upload"
+          scp "${ssh_options[@]}" \
+            "${RUNNER_TEMP}/release/${RELEASE_BASENAME}.sha256" \
+            "${remote}:.foundry-deploy/Foundry-single-host.zip.sha256.upload"
+          ssh "${ssh_options[@]}" "${remote}" 'set -Eeuo pipefail
+            cd "$HOME/.foundry-deploy"
+            mv -f -- Foundry-single-host.zip.upload Foundry-single-host.zip
+            sed "s/  .*/  Foundry-single-host.zip/" Foundry-single-host.zip.sha256.upload > Foundry-single-host.zip.sha256
+            rm -f -- Foundry-single-host.zip.sha256.upload
+            sha256sum -c Foundry-single-host.zip.sha256
+            sudo -n /usr/local/lib/foundry/ci-update.sh
+            systemctl is-active --quiet foundry.service
+            curl --fail --silent --show-error --retry 12 --retry-all-errors --retry-delay 5 http://127.0.0.1:3000/api/ready >/dev/null'
+
+      - name: Verify public HTTPS readiness
+        run: |
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
+            --retry 12 --retry-all-errors --retry-delay 5 \
+            "${PUBLIC_URL%/}/api/ready" >/dev/null
+          release_sha="$(sha256sum "${RUNNER_TEMP}/release/${RELEASE_BASENAME}" | awk '{print $1}')"
+          echo "### Production deployment PASS" >> "${GITHUB_STEP_SUMMARY}"
+          echo "Artifact: \`${RELEASE_BASENAME}\`" >> "${GITHUB_STEP_SUMMARY}"
+          echo "SHA-256: \`${release_sha}\`" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Record failed production deployment
+        if: failure()
+        run: |
+          echo "### Production deployment FAIL" >> "${GITHUB_STEP_SUMMARY}"
+          echo "Inspect the failed step and Foundry update output; no failure is converted to success." >> "${GITHUB_STEP_SUMMARY}"

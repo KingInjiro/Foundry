@@ -1,13 +1,31 @@
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import JSZip from 'jszip';
 
 const platformRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const port = Number(process.env.SMOKE_PORT || 4179);
 const baseUrl = `http://127.0.0.1:${port}`;
 const ownerUid = 'production-smoke-owner';
 const serverLogs = [];
+
+async function createSmokePackage() {
+    const zip = new JSZip();
+    zip.file('manifest.json', JSON.stringify({
+        version: 1,
+        format: 'web-game',
+        gameId: 'production-smoke',
+        gameVersion: '1.0.0',
+        name: 'Production Smoke',
+        runtime: 'web',
+        entry: 'index.html',
+        capabilities: []
+    }));
+    zip.file('index.html', '<!doctype html><html><body>FOUNDRY PRODUCTION SMOKE</body></html>');
+    return zip.generateAsync({ type: 'nodebuffer', platform: 'UNIX' });
+}
 
 function assert(condition, message) {
     if (!condition) throw new Error(message);
@@ -18,6 +36,7 @@ async function api(route, { method = 'GET', body, headers = {} } = {}) {
         method,
         headers: {
             'x-dev-uid': ownerUid,
+            Origin: baseUrl,
             ...(body !== undefined && { 'content-type': 'application/json' }),
             ...headers
         },
@@ -54,6 +73,10 @@ const child = spawn(process.execPath, ['dist/server.cjs'], {
         E2E_MODE: 'true',
         AUTH_DEV_BYPASS: 'true',
         JOB_MODE: 'inline',
+        TEST_JSON_LOGS: 'true',
+        PLATFORM_PUBLIC_BASE_URL: baseUrl,
+        LOCAL_AUTH_SESSION_SECRET: randomBytes(48).toString('hex'),
+        LOCAL_STORAGE_SIGNING_SECRET: randomBytes(48).toString('hex'),
         PORT: String(port),
         HOST: '127.0.0.1'
     },
@@ -78,7 +101,7 @@ try {
     assert(created.response.ok, `Project creation failed: ${created.text}`);
     const gameId = created.json.data.id;
 
-    const zip = await fs.readFile(path.join(platformRoot, 'e2e/fixtures/generic-valid-game.zip'));
+    const zip = await createSmokePackage();
     const session = await api(`/api/games/${gameId}/versions`, {
         method: 'POST',
         body: { expectedSize: zip.length }
@@ -87,7 +110,7 @@ try {
 
     const upload = await fetch(session.json.data.uploadUrl, {
         method: 'PUT',
-        headers: { 'content-type': 'application/zip' },
+        headers: { 'content-type': 'application/zip', Origin: baseUrl },
         body: zip
     });
     assert(upload.ok, `Package transfer returned ${upload.status}.`);
@@ -140,5 +163,6 @@ try {
 } finally {
     child.kill('SIGTERM');
     await new Promise(resolve => child.once('close', resolve));
+    assert(serverLogs.join('').includes('"event":"server_stopped"'), 'Compiled server did not complete graceful shutdown.');
     await fs.rm(path.join(platformRoot, '.e2e'), { recursive: true, force: true });
 }

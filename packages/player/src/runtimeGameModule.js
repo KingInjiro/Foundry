@@ -27,6 +27,22 @@ export function createInlineGameModuleSource(code) {
     `;
 }
 
+export function createEditorCommandModuleSource(code, { expression = true } = {}) {
+    if (typeof code !== 'string' || code.trim() === '' || code.length > 10_000) {
+        throw new Error('Editor console command is empty or too large.');
+    }
+    const body = expression ? `return (${code});` : code;
+    return `
+        const context = globalThis.__foundryEditorContext;
+        if (!context || context.enabled !== true) throw new Error('Editor console commands are disabled.');
+        const engine = context.engine;
+        const Foundry = context.Foundry;
+        const assets = context.assets;
+        const result = await (async () => { ${body}\n })();
+        context.report(result);
+    `;
+}
+
 export function getGameConstructor(moduleNamespace) {
     const GameClass = moduleNamespace?.default || moduleNamespace?.CustomGame || moduleNamespace?.Game;
     if (typeof GameClass !== 'function') {

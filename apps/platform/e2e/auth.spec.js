@@ -9,9 +9,10 @@ test.describe('Authentication', () => {
     await page.goto('/');
     await expect(page.getByRole('heading', { name: 'Foundry' })).toBeVisible();
     
-    // Developer dashboard should redirect or show unauthorized
+    // Keep the protected destination so sign-in can continue the original journey.
     await page.goto('/developer');
-    await expect(page).toHaveURL(/.*(\/|\/login)$/);
+    await expect(page).toHaveURL(/\/developer$/);
+    await expect(page.getByRole('heading', { name: 'Sign in to continue' })).toBeVisible();
   });
 
   test('Authenticated developer can access Developer Dashboard', async ({ page, context }) => {
@@ -34,6 +35,7 @@ test.describe('Authentication', () => {
     await page.click('button:has-text("Sign Out")');
     
     await page.goto('/developer');
-    await expect(page).toHaveURL(/.*(\/|\/login)$/);
+    await expect(page).toHaveURL(/\/developer$/);
+    await expect(page.getByRole('heading', { name: 'Sign in to continue' })).toBeVisible();
   });
 });

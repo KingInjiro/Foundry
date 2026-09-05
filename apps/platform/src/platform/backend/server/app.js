@@ -12,10 +12,14 @@ import express from 'express';
 import { GameVersionPublishService } from '../extraction/GameVersionPublishService.js';
 import { LocalJobQueue } from '../jobs/LocalJobQueue.js';
 import { requireAuth, optionalAuth } from '../auth/authMiddleware.js';
+import { LocalAuthError, LocalAuthService, normalizeLocalUsername } from '../auth/LocalAuthService.js';
 import { LocalSqliteProvider } from '../database/LocalSqliteProvider.js';
 import { R2StorageProvider } from '../storage/R2StorageProvider.js';
 import { ReleaseLifecycleService } from '../lifecycle/ReleaseLifecycleService.js';
 import { createJsonLogger } from '../observability/JsonLogger.js';
+import { isFirebaseAdminConfigured } from '../auth/firebaseAdmin.js';
+import { applySecurityHeaders } from '../security/securityHeaders.js';
+import { DEPLOYMENT_MODES, resolveDeploymentMode } from '../config/deploymentMode.js';
 
 export function parseByteRange(rangeHeader, contentLength) {
     if (!rangeHeader) return null;
@@ -64,6 +68,44 @@ export function parseDiscoveryExclusions(value, limit = 50) {
 }
 
 const CATALOG_SORTS = new Set(['featured', 'newest', 'rating', 'popular', 'name']);
+const EDITOR_PROJECT_MAX_FILES = 100;
+const EDITOR_PROJECT_MAX_BYTES = 5 * 1024 * 1024;
+const REPORT_CATEGORIES = new Set(['BROKEN', 'SPAM', 'HARASSMENT', 'HATE', 'SEXUAL', 'VIOLENCE', 'COPYRIGHT', 'OTHER']);
+const MODERATION_STATES = new Set(['ACTIVE', 'QUARANTINED', 'HIDDEN']);
+const MODERATION_REPORT_STATUSES = new Set(['OPEN', 'RESOLVED', 'DISMISSED']);
+const MODERATOR_ROLES = new Set(['ADMIN', 'MODERATOR']);
+
+export function validateEditorProjectFiles(value) {
+    if (!Array.isArray(value) || value.length === 0 || value.length > EDITOR_PROJECT_MAX_FILES) {
+        return { valid: false, message: `Editor project files must contain 1 to ${EDITOR_PROJECT_MAX_FILES} entries.` };
+    }
+
+    let totalBytes = 0;
+    const normalized = [];
+    const ids = new Set();
+    const names = new Set();
+    for (const candidate of value) {
+        const id = typeof candidate?.id === 'string' ? candidate.id.trim() : '';
+        const name = typeof candidate?.name === 'string' ? candidate.name.trim().replace(/\\/g, '/') : '';
+        const code = typeof candidate?.code === 'string' ? candidate.code : null;
+        const unsafeName = !name
+            || name.length > 240
+            || name.startsWith('/')
+            || name.split('/').some(segment => !segment || segment === '.' || segment === '..');
+        if (!id || id.length > 128 || ids.has(id) || unsafeName || names.has(name.toLocaleLowerCase()) || code === null) {
+            return { valid: false, message: 'Editor project contains an invalid or duplicate file entry.' };
+        }
+        totalBytes += Buffer.byteLength(id) + Buffer.byteLength(name) + Buffer.byteLength(code);
+        if (totalBytes > EDITOR_PROJECT_MAX_BYTES) {
+            return { valid: false, message: `Editor project exceeds the ${EDITOR_PROJECT_MAX_BYTES}-byte storage limit.` };
+        }
+        ids.add(id);
+        names.add(name.toLocaleLowerCase());
+        normalized.push({ id, name, code });
+    }
+
+    return { valid: true, files: normalized, totalBytes };
+}
 
 function catalogCursorFingerprint(filters) {
     return crypto.createHash('sha256').update(JSON.stringify(filters)).digest('base64url').slice(0, 16);
@@ -156,8 +198,20 @@ export function createApp(injectedDb, injectedStorage, jobQueue, options = {}) {
     const db = injectedDb || new LocalSqliteProvider(process.env.TEST_DB_PATH || process.env.PLATFORM_DB_PATH || '.data/platform.db');
     const storage = injectedStorage || new R2StorageProvider();
     const logger = options.logger || createJsonLogger();
+    const runtimeConfig = options.runtimeConfig || {};
+    const deploymentMode = runtimeConfig.deploymentMode || resolveDeploymentMode(process.env);
+    const localAuthService = options.localAuthService || (deploymentMode === DEPLOYMENT_MODES.SINGLE_HOST
+        ? new LocalAuthService(db, {
+            sessionSecret: options.localAuthOptions?.sessionSecret || process.env.LOCAL_AUTH_SESSION_SECRET,
+            sessionTtlSeconds: options.localAuthOptions?.sessionTtlSeconds || runtimeConfig.localAuthSessionTtlSeconds || process.env.LOCAL_AUTH_SESSION_TTL_SECONDS,
+            secureCookies: options.localAuthOptions?.secureCookies ?? runtimeConfig.production === true,
+            publicOrigin: runtimeConfig.publicBaseUrl || process.env.PLATFORM_PUBLIC_BASE_URL,
+            now: options.localAuthOptions?.now,
+            randomBytes: options.localAuthOptions?.randomBytes
+        })
+        : null);
     
-    const jobs = jobQueue || new LocalJobQueue(db);
+    const jobs = jobQueue || new LocalJobQueue(db, {}, { logger });
     
     // Register handlers
     const extractor = new GamePackageExtractor(storage);
@@ -172,12 +226,18 @@ export function createApp(injectedDb, injectedStorage, jobQueue, options = {}) {
     jobs.registerHandler('DELETE_GAME', releaseLifecycle.processDeleteGameJob.bind(releaseLifecycle));
 
     const app = express();
+    const trustProxyHops = Number.isSafeInteger(runtimeConfig.trustProxyHops)
+        ? runtimeConfig.trustProxyHops
+        : Math.max(0, Math.min(Number(process.env.TRUST_PROXY_HOPS) || 0, 3));
+    if (trustProxyHops > 0) app.set('trust proxy', trustProxyHops);
     app.locals.database = db;
     app.locals.storage = storage;
     app.locals.jobQueue = jobs;
     app.locals.uploadCleanupService = cleanupService;
     app.locals.releaseLifecycleService = releaseLifecycle;
     app.locals.logger = logger;
+    app.locals.deploymentMode = deploymentMode;
+    app.locals.localAuthService = localAuthService;
     app.locals.startedAt = Date.now();
     app.disable('x-powered-by');
 
@@ -187,10 +247,28 @@ export function createApp(injectedDb, injectedStorage, jobQueue, options = {}) {
             ? suppliedRequestId
             : crypto.randomUUID();
         res.setHeader('X-Request-Id', req.requestId);
+        const decodePathId = value => {
+            try { return value ? decodeURIComponent(value) : undefined; } catch { return value || undefined; }
+        };
+        const gameMatch = req.path.match(/^\/api\/(?:catalog\/|moderation\/)?games\/([^/]+)/)
+            || req.path.match(/^\/api\/cdn\/games\/([^/]+)/);
+        const versionMatch = req.path.match(/\/versions\/([^/]+)/);
+        const uploadMatch = req.path.match(/^\/api\/uploads\/([^/]+)/);
+        const reportMatch = req.path.match(/^\/api\/moderation\/reports\/([^/]+)/);
+        res.locals.gameId = decodePathId(gameMatch?.[1]);
+        res.locals.versionId = decodePathId(versionMatch?.[1]);
+        res.locals.uploadSessionId = decodePathId(uploadMatch?.[1]);
+        res.locals.reportId = decodePathId(reportMatch?.[1]);
         const startedAt = Date.now();
         res.once('finish', () => {
             logger.info('http_request', {
                 requestId: req.requestId,
+                userUid: req.auth?.uid || undefined,
+                gameId: res.locals.gameId || undefined,
+                versionId: res.locals.versionId || undefined,
+                jobId: res.locals.jobId || undefined,
+                uploadSessionId: res.locals.uploadSessionId || undefined,
+                reportId: res.locals.reportId || undefined,
                 method: req.method,
                 path: req.path,
                 statusCode: res.statusCode,
@@ -199,17 +277,13 @@ export function createApp(injectedDb, injectedStorage, jobQueue, options = {}) {
         });
         next();
     });
+    app.use('/api/editor-projects', express.json({ limit: '6mb' }));
     app.use(express.json());
 
-    app.use((req, res, next) => {
-        res.setHeader('X-Content-Type-Options', 'nosniff');
-        res.setHeader('Referrer-Policy', 'no-referrer');
-        res.setHeader('X-Frame-Options', 'SAMEORIGIN');
-        res.setHeader('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
-        res.setHeader('Origin-Agent-Cluster', '?1');
-        res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=(), serial=()');
-        next();
-    });
+    app.use(applySecurityHeaders({
+        hstsEnabled: Boolean(runtimeConfig.hstsEnabled),
+        development: runtimeConfig.production !== true && process.env.NODE_ENV !== 'production'
+    }));
 
     app.options('/api/cdn/*', (req, res) => {
         res.setHeader('Access-Control-Allow-Origin', '*');
@@ -238,9 +312,14 @@ export function createApp(injectedDb, injectedStorage, jobQueue, options = {}) {
             const gameId = parts[1];
             const versionId = parts[3];
             const expectedRuntimeUrl = `/api/cdn/games/${gameId}/versions/${versionId}/extracted`;
-            const version = await db.getGameVersion(versionId);
+            const [game, version] = await Promise.all([
+                db.getGame(gameId),
+                db.getGameVersion(versionId)
+            ]);
             if (
-                !version
+                !game
+                || game.moderationState !== 'ACTIVE'
+                || !version
                 || version.gameId !== gameId
                 || version.status !== 'PUBLISHED'
                 || version.runtimeUrl !== expectedRuntimeUrl
@@ -267,7 +346,10 @@ export function createApp(injectedDb, injectedStorage, jobQueue, options = {}) {
 
             const contentType = mime.lookup(objectKey) || metadata.contentType || 'application/octet-stream';
             res.setHeader('Content-Type', contentType);
-            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+            // R2 objects are immutable, but every public request must revalidate
+            // through this authorization/moderation gate. Without a CDN purge
+            // integration, a year-long fresh cache would outlive quarantine.
+            res.setHeader('Cache-Control', 'public, no-cache');
             res.setHeader('Access-Control-Allow-Origin', '*');
             res.setHeader('Access-Control-Expose-Headers', 'Accept-Ranges, Content-Length, Content-Range, ETag, Last-Modified');
             res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
@@ -343,10 +425,24 @@ export function createApp(injectedDb, injectedStorage, jobQueue, options = {}) {
             : new LocalRateLimiter()
     );
     app.locals.rateLimiter = rateLimiter;
+    const authIpIdentity = req => `ip:${req.ip}`;
+    const authAccountIdentity = req => `username:${normalizeLocalUsername(req.body?.username) || 'invalid'}`;
+    const rlAuthRegisterIp = createRateLimitMiddleware(rateLimiter, 'auth_register_ip', { identity: authIpIdentity });
+    const rlAuthLoginIp = createRateLimitMiddleware(rateLimiter, 'auth_login_ip', { identity: authIpIdentity });
+    const rlAuthLoginAccount = createRateLimitMiddleware(rateLimiter, 'auth_login_account', { identity: authAccountIdentity });
     const rlCreateVersion = createRateLimitMiddleware(rateLimiter, 'create_version');
     const rlCompleteUpload = createRateLimitMiddleware(rateLimiter, 'complete_upload');
     const rlPublishVersion = createRateLimitMiddleware(rateLimiter, 'publish_version');
     const rlReleaseLifecycle = createRateLimitMiddleware(rateLimiter, 'release_lifecycle');
+    const rlReportGame = createRateLimitMiddleware(rateLimiter, 'report_game');
+    const publicIdentity = req => req.auth?.uid ? `uid:${req.auth.uid}` : `ip:${req.ip}`;
+    const rlCreateGame = createRateLimitMiddleware(rateLimiter, 'create_game');
+    const rlEditorWrite = createRateLimitMiddleware(rateLimiter, 'editor_write');
+    const rlDiscoveryRead = createRateLimitMiddleware(rateLimiter, 'discovery_read', { identity: publicIdentity });
+    const rlCatalogRead = createRateLimitMiddleware(rateLimiter, 'catalog_read', { identity: publicIdentity });
+    const rlRatingWrite = createRateLimitMiddleware(rateLimiter, 'rating_write');
+    const rlFollowWrite = createRateLimitMiddleware(rateLimiter, 'follow_write');
+    const rlModerationAction = createRateLimitMiddleware(rateLimiter, 'moderation_action');
 
     const ensureProfile = async (req, res, next) => {
         try {
@@ -369,6 +465,13 @@ export function createApp(injectedDb, injectedStorage, jobQueue, options = {}) {
             console.error('Error ensuring profile:', e);
             res.status(500).json({ success: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load user profile' } });
         }
+    };
+
+    const requireModerator = (req, res, next) => {
+        if (!MODERATOR_ROLES.has(req.userProfile?.role)) {
+            return res.status(403).json({ success: false, error: { code: 'MODERATOR_REQUIRED', message: 'Moderator access is required.' } });
+        }
+        next();
     };
 
 
@@ -405,8 +508,233 @@ export function createApp(injectedDb, injectedStorage, jobQueue, options = {}) {
     
 
     
+    if (localAuthService) {
+        const safeMethods = new Set(['GET', 'HEAD', 'OPTIONS']);
+        const csrfExemptPaths = new Set(['/api/auth/local/register', '/api/auth/local/login', storage.uploadRoute]);
+        app.use('/api', (req, res, next) => {
+            if (safeMethods.has(req.method)) return next();
+            if (!localAuthService.verifyRequestOrigin(req)) {
+                return res.status(403).json({
+                    success: false,
+                    error: { code: 'ORIGIN_DENIED', message: 'This request did not originate from this Foundry server.' }
+                });
+            }
+            const requestPath = String(req.originalUrl || '').split('?')[0];
+            if (csrfExemptPaths.has(requestPath)) return next();
+            const sessionToken = localAuthService.readSessionToken(req);
+            if (!sessionToken) return next();
+            const tokenHash = localAuthService.sessionTokenHash(sessionToken);
+            if (!localAuthService.verifyCsrf(req, tokenHash)) {
+                return res.status(403).json({
+                    success: false,
+                    error: { code: 'CSRF_TOKEN_INVALID', message: 'The request security token is missing or invalid.' }
+                });
+            }
+            next();
+        });
+
+        if (storage.kind === 'local-disk' && storage.uploadRoute) {
+            app.put(
+                storage.uploadRoute,
+                express.raw({ type: '*/*', limit: QuotaConfig.PLATFORM_MAX_PACKAGE_SIZE_BYTES }),
+                async (req, res) => {
+                    const objectKey = typeof req.query.key === 'string' ? req.query.key : '';
+                    const contentType = typeof req.query.contentType === 'string' ? req.query.contentType : 'application/zip';
+                    const actualContentType = String(req.get('Content-Type') || '').split(';')[0].trim().toLowerCase();
+                    try {
+                        const validSignature = storage.verifyUploadRequest({
+                            objectKey,
+                            contentType,
+                            expires: req.query.expires,
+                            signature: req.query.signature
+                        });
+                        if (!validSignature || actualContentType !== contentType.toLowerCase()) {
+                            return res.status(403).json({
+                                success: false,
+                                error: { code: 'UPLOAD_SIGNATURE_INVALID', message: 'The local upload URL is invalid or expired.' }
+                            });
+                        }
+                        await storage.uploadBuffer(objectKey, req.body, contentType);
+                        res.sendStatus(200);
+                    } catch (error) {
+                        logger.warn('local_object_upload_rejected', {
+                            requestId: req.requestId,
+                            errorCode: error?.code || 'LOCAL_UPLOAD_FAILED'
+                        });
+                        res.status(400).json({
+                            success: false,
+                            error: { code: 'LOCAL_UPLOAD_FAILED', message: 'The package could not be stored.' }
+                        });
+                    }
+                }
+            );
+        }
+
+        const sendLocalAuthError = (req, res, error, event) => {
+            const known = error instanceof LocalAuthError;
+            if (!known) logger.error(event, { requestId: req.requestId, error });
+            else logger.warn(event, { requestId: req.requestId, errorCode: error.code });
+            return res.status(known ? error.status : 500).json({
+                success: false,
+                error: {
+                    code: known ? error.code : 'LOCAL_AUTH_FAILED',
+                    message: known ? error.message : 'The local authentication request failed.'
+                }
+            });
+        };
+
+        app.post('/api/auth/local/register', rlAuthRegisterIp, async (req, res) => {
+            try {
+                const session = await localAuthService.register({
+                    username: req.body?.username,
+                    password: req.body?.password,
+                    displayName: req.body?.displayName
+                });
+                res.setHeader('Set-Cookie', localAuthService.sessionCookie(session.token));
+                res.status(201).json({
+                    success: true,
+                    data: { user: session.user, csrfToken: session.csrfToken, expiresAt: session.expiresAt }
+                });
+            } catch (error) {
+                sendLocalAuthError(req, res, error, 'local_registration_failed');
+            }
+        });
+
+        app.post('/api/auth/local/login', rlAuthLoginIp, rlAuthLoginAccount, async (req, res) => {
+            try {
+                const session = await localAuthService.login({
+                    username: req.body?.username,
+                    password: req.body?.password
+                });
+                res.setHeader('Set-Cookie', localAuthService.sessionCookie(session.token));
+                res.json({
+                    success: true,
+                    data: { user: session.user, csrfToken: session.csrfToken, expiresAt: session.expiresAt }
+                });
+            } catch (error) {
+                sendLocalAuthError(req, res, error, 'local_login_failed');
+            }
+        });
+
+        app.get('/api/auth/local/session', optionalAuth, (req, res, next) => {
+            if (!req.auth) {
+                return res.json({
+                    success: true,
+                    data: { user: null, csrfToken: null, expiresAt: null }
+                });
+            }
+            return ensureProfile(req, res, next);
+        }, (req, res) => {
+            res.json({
+                success: true,
+                data: {
+                    user: { ...req.userProfile, username: req.localAuthSession.user.username },
+                    csrfToken: req.localAuthSession.csrfToken,
+                    expiresAt: req.localAuthSession.expiresAt
+                }
+            });
+        });
+
+        app.post('/api/auth/local/logout', async (req, res) => {
+            await localAuthService.logoutRequest(req);
+            res.setHeader('Set-Cookie', localAuthService.clearSessionCookie());
+            res.json({ success: true, data: { signedOut: true } });
+        });
+    }
+
     app.get('/api/auth/me', requireAuth, ensureProfile, (req, res) => {
         res.json({ success: true, data: req.userProfile });
+    });
+
+    const loadOwnedEditorProject = async (req, res) => {
+        const project = await db.getEditorProject(req.params.id);
+        if (!project || project.ownerUid !== req.auth.uid) {
+            res.status(404).json({ success: false, error: { code: 'EDITOR_PROJECT_NOT_FOUND', message: 'Editor project not found.' } });
+            return null;
+        }
+        const validation = validateEditorProjectFiles(project.files);
+        if (!validation.valid) {
+            res.status(422).json({ success: false, error: { code: 'EDITOR_PROJECT_CORRUPT', message: 'Stored editor project data is malformed.' } });
+            return null;
+        }
+        return { ...project, files: validation.files };
+    };
+
+    app.get('/api/editor-projects', requireAuth, ensureProfile, async (req, res) => {
+        const projects = await db.listEditorProjects(req.auth.uid);
+        const safeProjects = projects.map(project => ({
+            id: project.id,
+            title: project.title,
+            platformGameId: project.platformGameId,
+            lastReadyVersionId: project.lastReadyVersionId,
+            createdAt: project.createdAt,
+            updatedAt: project.updatedAt
+        }));
+        res.json({ success: true, data: safeProjects });
+    });
+
+    app.post('/api/editor-projects', requireAuth, ensureProfile, rlEditorWrite, async (req, res) => {
+        const validation = validateEditorProjectFiles(req.body?.files);
+        const title = typeof req.body?.title === 'string' ? req.body.title.trim() : 'Untitled Editor Project';
+        if (!validation.valid) {
+            return res.status(400).json({ success: false, error: { code: 'INVALID_EDITOR_PROJECT', message: validation.message } });
+        }
+        if (!title || title.length > 120) {
+            return res.status(400).json({ success: false, error: { code: 'INVALID_EDITOR_PROJECT_TITLE', message: 'Project title must contain 1 to 120 characters.' } });
+        }
+        const now = Date.now();
+        const project = await db.createEditorProject({
+            id: crypto.randomUUID(),
+            ownerUid: req.auth.uid,
+            title,
+            files: validation.files,
+            createdAt: now,
+            updatedAt: now
+        });
+        res.status(201).json({ success: true, data: project });
+    });
+
+    app.get('/api/editor-projects/:id', requireAuth, ensureProfile, async (req, res) => {
+        const project = await loadOwnedEditorProject(req, res);
+        if (project) res.json({ success: true, data: project });
+    });
+
+    app.put('/api/editor-projects/:id', requireAuth, ensureProfile, rlEditorWrite, async (req, res) => {
+        const existing = await loadOwnedEditorProject(req, res);
+        if (!existing) return;
+        const validation = validateEditorProjectFiles(req.body?.files);
+        const title = typeof req.body?.title === 'string' ? req.body.title.trim() : existing.title;
+        if (!validation.valid) {
+            return res.status(400).json({ success: false, error: { code: 'INVALID_EDITOR_PROJECT', message: validation.message } });
+        }
+        if (!title || title.length > 120) {
+            return res.status(400).json({ success: false, error: { code: 'INVALID_EDITOR_PROJECT_TITLE', message: 'Project title must contain 1 to 120 characters.' } });
+        }
+        const project = await db.updateEditorProject(existing.id, req.auth.uid, { title, files: validation.files });
+        res.json({ success: true, data: project });
+    });
+
+    app.put('/api/editor-projects/:id/platform-link', requireAuth, ensureProfile, rlEditorWrite, async (req, res) => {
+        const project = await loadOwnedEditorProject(req, res);
+        if (!project) return;
+        const platformGameId = typeof req.body?.platformGameId === 'string' ? req.body.platformGameId.trim() : '';
+        const lastReadyVersionId = typeof req.body?.lastReadyVersionId === 'string' ? req.body.lastReadyVersionId.trim() : null;
+        if (!platformGameId) {
+            const unlinked = await db.linkEditorProject(project.id, req.auth.uid, null, null);
+            return res.json({ success: true, data: unlinked });
+        }
+        const game = await db.getGame(platformGameId);
+        if (!game || game.ownerUid !== req.auth.uid) {
+            return res.status(403).json({ success: false, error: { code: 'EDITOR_LINK_FORBIDDEN', message: 'The selected Platform project is not owned by this account.' } });
+        }
+        if (lastReadyVersionId) {
+            const version = await db.getGameVersion(lastReadyVersionId);
+            if (!version || version.gameId !== game.id || !['READY', 'PUBLISHING', 'PUBLISHED', 'PUBLISH_FAILED'].includes(version.status)) {
+                return res.status(400).json({ success: false, error: { code: 'INVALID_EDITOR_LINK_VERSION', message: 'The linked version is not a usable release candidate for this project.' } });
+            }
+        }
+        const linked = await db.linkEditorProject(project.id, req.auth.uid, game.id, lastReadyVersionId);
+        res.json({ success: true, data: linked });
     });
     
     app.get('/api/health', (req, res) => {
@@ -414,6 +742,8 @@ export function createApp(injectedDb, injectedStorage, jobQueue, options = {}) {
             success: true,
             data: {
                 status: 'ok',
+                deploymentMode,
+                authProvider: localAuthService ? 'local' : 'firebase',
                 uptimeSeconds: Math.floor((Date.now() - app.locals.startedAt) / 1000),
                 storageConfigured: Boolean(storage.isConfigured),
                 storageProvider: storage.kind || 'custom',
@@ -423,9 +753,10 @@ export function createApp(injectedDb, injectedStorage, jobQueue, options = {}) {
         });
     });
 
-    app.get('/api/ready', async (req, res) => {
-        const checks = { database: false, storage: false, jobs: false };
+    const checkReadiness = async (requestId = null) => {
+        const checks = { database: false, storage: false, jobs: false, auth: false };
         let queue = null;
+        let queueStopping = false;
         try {
             checks.database = typeof db.ping === 'function' ? await db.ping() : Boolean(db);
             checks.storage = typeof storage.ping === 'function'
@@ -433,6 +764,7 @@ export function createApp(injectedDb, injectedStorage, jobQueue, options = {}) {
                 : Boolean(storage.isConfigured);
             if (typeof jobs.getStatus === 'function') {
                 const status = await jobs.getStatus();
+                queueStopping = status.stopping === true;
                 queue = {
                     mode: status.mode || 'custom',
                     queued: Number(status.queued || 0),
@@ -443,18 +775,27 @@ export function createApp(injectedDb, injectedStorage, jobQueue, options = {}) {
             } else {
                 queue = typeof jobs.enqueue === 'function' ? { mode: 'custom' } : null;
             }
-            checks.jobs = Boolean(queue);
+            checks.jobs = Boolean(queue) && !queueStopping;
+            checks.auth = localAuthService
+                ? await localAuthService.isReady()
+                : (process.env.NODE_ENV !== 'production' || isFirebaseAdminConfigured());
         } catch (error) {
-            logger.error('readiness_check_failed', { requestId: req.requestId, error });
+            logger.error('readiness_check_failed', { requestId: requestId || undefined, error });
         }
         const ready = Object.values(checks).every(Boolean);
+        return { ready, checks, queue };
+    };
+    app.locals.checkReadiness = checkReadiness;
+
+    app.get('/api/ready', async (req, res) => {
+        const { ready, checks, queue } = await checkReadiness(req.requestId);
         res.status(ready ? 200 : 503).json({
             success: ready,
             data: { status: ready ? 'ready' : 'not_ready', checks, queue }
         });
     });
 
-    app.post('/api/games', requireAuth, ensureProfile, async (req, res) => {
+    app.post('/api/games', requireAuth, ensureProfile, rlCreateGame, async (req, res) => {
         try {
             const title = typeof req.body?.title === 'string' ? req.body.title.trim() : '';
             const description = typeof req.body?.description === 'string' ? req.body.description.trim() : '';
@@ -607,6 +948,59 @@ export function createApp(injectedDb, injectedStorage, jobQueue, options = {}) {
         } catch (e) {
             console.error(e);
             res.status(500).json({ success: false, error: { code: 'INTERNAL_ERROR', message: 'Internal server error' } });
+        }
+    });
+
+    app.get('/api/uploads/recovery', requireAuth, ensureProfile, async (req, res) => {
+        try {
+            const rows = await db.listUploadRecovery(req.auth.uid);
+            const now = Date.now();
+            const recovery = rows.map(row => ({
+                ...row,
+                expired: row.sessionId ? Number(row.expiresAt || 0) <= now : false,
+                requiresFileReselection: row.sessionStatus === 'CREATED',
+                resumable: row.sessionStatus === 'CREATED' && Number(row.expiresAt || 0) > now
+            }));
+            res.json({ success: true, data: recovery });
+        } catch (error) {
+            logger.error('upload_recovery_list_failed', { requestId: req.requestId, error });
+            res.status(500).json({ success: false, error: { code: 'UPLOAD_RECOVERY_FAILED', message: 'Could not inspect pending upload work.' } });
+        }
+    });
+
+    app.post('/api/uploads/:sessionId/resume', requireAuth, ensureProfile, async (req, res) => {
+        try {
+            const session = await db.getUploadSession(req.params.sessionId);
+            if (!session || session.ownerUid !== req.auth.uid) {
+                return res.status(404).json({ success: false, error: { code: 'UPLOAD_SESSION_NOT_FOUND', message: 'Upload session not found.' } });
+            }
+            if (session.status !== 'CREATED') {
+                return res.status(409).json({ success: false, error: { code: 'UPLOAD_NOT_RESUMABLE', message: 'This upload session is no longer waiting for a file.' } });
+            }
+            if (Date.now() >= Number(session.expiresAt || 0)) {
+                await db.transaction(async tx => {
+                    await tx.updateUploadSessionStatus(session.id, 'EXPIRED');
+                    const version = await tx.getGameVersion(session.versionId);
+                    if (version?.status === 'UPLOADING') await tx.updateGameVersionStatus(version.id, 'EXPIRED');
+                });
+                return res.status(410).json({ success: false, error: { code: 'UPLOAD_SESSION_EXPIRED', message: 'This upload session expired. Start a new version upload.' } });
+            }
+            const { uploadUrl } = await storage.createUploadSession(session.objectKey);
+            await db.updateUploadSession(session.id, { updatedAt: Date.now() });
+            res.json({
+                success: true,
+                data: {
+                    uploadUrl,
+                    sessionId: session.id,
+                    versionId: session.versionId,
+                    gameId: session.gameId,
+                    expectedSize: session.expectedSize,
+                    expiresAt: session.expiresAt
+                }
+            });
+        } catch (error) {
+            logger.error('upload_resume_failed', { requestId: req.requestId, sessionId: req.params.sessionId, error });
+            res.status(500).json({ success: false, error: { code: 'UPLOAD_RESUME_FAILED', message: 'Could not resume this upload session.' } });
         }
     });
 
@@ -949,92 +1343,227 @@ export function createApp(injectedDb, injectedStorage, jobQueue, options = {}) {
         }
     });
 
+    app.post('/api/games/:id/reports', requireAuth, ensureProfile, rlReportGame, async (req, res) => {
+        try {
+            const category = typeof req.body?.category === 'string' ? req.body.category.trim().toUpperCase() : '';
+            const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+            if (!REPORT_CATEGORIES.has(category) || reason.length < 10 || reason.length > 1000) {
+                return res.status(400).json({ success: false, error: { code: 'INVALID_REPORT', message: 'Choose a valid category and provide 10 to 1,000 characters of context.' } });
+            }
+            const game = await db.getGame(req.params.id);
+            if (!game || game.moderationState !== 'ACTIVE' || !await db.getPublishedGameVersion(game.id)) {
+                return res.status(404).json({ success: false, error: { code: 'GAME_NOT_REPORTABLE', message: 'This game is not publicly available.' } });
+            }
+            const report = await db.createGameReport({
+                id: crypto.randomUUID(),
+                gameId: game.id,
+                reporterUid: req.auth.uid,
+                category,
+                reason,
+                status: 'OPEN',
+                createdAt: Date.now()
+            });
+            res.status(201).json({ success: true, data: { id: report.id, status: report.status } });
+        } catch (error) {
+            logger.error('game_report_failed', { requestId: req.requestId, gameId: req.params.id, error });
+            res.status(500).json({ success: false, error: { code: 'REPORT_FAILED', message: 'Could not submit this report.' } });
+        }
+    });
+
+    app.get('/api/moderation/reports', requireAuth, ensureProfile, requireModerator, async (req, res) => {
+        try {
+            const requestedStatus = typeof req.query.status === 'string' ? req.query.status.trim().toUpperCase() : 'OPEN';
+            if (requestedStatus !== 'ALL' && !MODERATION_REPORT_STATUSES.has(requestedStatus)) {
+                return res.status(400).json({ success: false, error: { code: 'INVALID_REPORT_STATUS', message: 'Unsupported report status.' } });
+            }
+            const limit = Math.max(1, Math.min(Number(req.query.limit) || 50, 100));
+            const [items, pendingCount] = await Promise.all([
+                db.listModerationReports(requestedStatus === 'ALL' ? '' : requestedStatus, limit),
+                db.countOpenGameReports()
+            ]);
+            res.json({ success: true, data: { items, pendingCount } });
+        } catch (error) {
+            logger.error('moderation_report_queue_failed', { requestId: req.requestId, operatorUid: req.auth.uid, error });
+            res.status(500).json({ success: false, error: { code: 'MODERATION_QUEUE_FAILED', message: 'Could not load the moderation queue.' } });
+        }
+    });
+
+    app.get('/api/moderation/games/:id/reports', requireAuth, ensureProfile, requireModerator, async (req, res) => {
+        const game = await db.getGame(req.params.id);
+        if (!game) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Game not found.' } });
+        const requestedStatus = typeof req.query.status === 'string' ? req.query.status.trim().toUpperCase() : '';
+        if (requestedStatus && !MODERATION_REPORT_STATUSES.has(requestedStatus)) {
+            return res.status(400).json({ success: false, error: { code: 'INVALID_REPORT_STATUS', message: 'Unsupported report status.' } });
+        }
+        res.json({ success: true, data: await db.listGameReports(game.id, requestedStatus || null) });
+    });
+
+    app.get('/api/moderation/games/:id/actions', requireAuth, ensureProfile, requireModerator, async (req, res) => {
+        const game = await db.getGame(req.params.id);
+        if (!game) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Game not found.' } });
+        res.json({ success: true, data: await db.listModerationActions(game.id) });
+    });
+
+    app.patch('/api/moderation/games/:id', requireAuth, ensureProfile, requireModerator, rlModerationAction, async (req, res) => {
+        try {
+            const moderationState = typeof req.body?.moderationState === 'string' ? req.body.moderationState.trim().toUpperCase() : '';
+            const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+            if (!MODERATION_STATES.has(moderationState)) {
+                return res.status(400).json({ success: false, error: { code: 'INVALID_MODERATION_STATE', message: 'Unsupported moderation state.' } });
+            }
+            if (reason.length < 10 || reason.length > 1000) {
+                return res.status(400).json({ success: false, error: { code: 'INVALID_MODERATION_REASON', message: 'Provide 10 to 1,000 characters explaining this action.' } });
+            }
+            const existing = await db.getGame(req.params.id);
+            if (!existing) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Game not found.' } });
+            const action = await db.transaction(async tx => {
+                const game = await tx.updateGameModerationState(existing.id, moderationState);
+                const audit = await tx.createModerationAction({
+                    id: crypto.randomUUID(),
+                    gameId: game.id,
+                    operatorUid: req.auth.uid,
+                    action: 'SET_GAME_STATE',
+                    previousState: existing.moderationState || 'ACTIVE',
+                    nextState: moderationState,
+                    reason,
+                    createdAt: Date.now()
+                });
+                return { game, audit };
+            });
+            res.locals.gameId = action.game.id;
+            logger.info('game_moderation_state_changed', {
+                requestId: req.requestId,
+                gameId: action.game.id,
+                previousState: existing.moderationState || 'ACTIVE',
+                moderationState,
+                operatorUid: req.auth.uid,
+                actionId: action.audit.id
+            });
+            res.json({ success: true, data: { gameId: action.game.id, moderationState: action.game.moderationState, actionId: action.audit.id } });
+        } catch (error) {
+            logger.error('game_moderation_state_change_failed', { requestId: req.requestId, gameId: req.params.id, operatorUid: req.auth.uid, error });
+            res.status(500).json({ success: false, error: { code: 'MODERATION_ACTION_FAILED', message: 'Could not apply the moderation action.' } });
+        }
+    });
+
+    app.patch('/api/moderation/reports/:reportId', requireAuth, ensureProfile, requireModerator, rlModerationAction, async (req, res) => {
+        try {
+            const status = typeof req.body?.status === 'string' ? req.body.status.trim().toUpperCase() : '';
+            const resolution = typeof req.body?.resolution === 'string' ? req.body.resolution.trim() : '';
+            const requestedState = typeof req.body?.moderationState === 'string' ? req.body.moderationState.trim().toUpperCase() : null;
+            if (!new Set(['RESOLVED', 'DISMISSED']).has(status)) {
+                return res.status(400).json({ success: false, error: { code: 'INVALID_REPORT_STATUS', message: 'Reports may only be resolved or dismissed.' } });
+            }
+            if (resolution.length < 10 || resolution.length > 1000) {
+                return res.status(400).json({ success: false, error: { code: 'INVALID_MODERATION_REASON', message: 'Provide 10 to 1,000 characters explaining this resolution.' } });
+            }
+            if (requestedState && !MODERATION_STATES.has(requestedState)) {
+                return res.status(400).json({ success: false, error: { code: 'INVALID_MODERATION_STATE', message: 'Unsupported moderation state.' } });
+            }
+            const existingReport = await db.getGameReport(req.params.reportId);
+            if (!existingReport) return res.status(404).json({ success: false, error: { code: 'REPORT_NOT_FOUND', message: 'Report not found.' } });
+            if (existingReport.status !== 'OPEN') {
+                return res.status(409).json({ success: false, error: { code: 'REPORT_ALREADY_RESOLVED', message: 'This report has already been processed.' } });
+            }
+            const existingGame = await db.getGame(existingReport.gameId);
+            if (!existingGame) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Game not found.' } });
+            const resolvedAt = Date.now();
+            const result = await db.transaction(async tx => {
+                const game = requestedState
+                    ? await tx.updateGameModerationState(existingGame.id, requestedState)
+                    : existingGame;
+                const report = await tx.resolveGameReport(existingReport.id, {
+                    status,
+                    resolution,
+                    resolvedByUid: req.auth.uid,
+                    resolvedAt
+                });
+                if (!report) {
+                    const conflict = new Error('Report was processed concurrently.');
+                    conflict.code = 'REPORT_ALREADY_RESOLVED';
+                    throw conflict;
+                }
+                const audit = await tx.createModerationAction({
+                    id: crypto.randomUUID(),
+                    gameId: existingGame.id,
+                    reportId: existingReport.id,
+                    operatorUid: req.auth.uid,
+                    action: status === 'DISMISSED' ? 'DISMISS_REPORT' : 'RESOLVE_REPORT',
+                    previousState: existingGame.moderationState || 'ACTIVE',
+                    nextState: game.moderationState || 'ACTIVE',
+                    reason: resolution,
+                    createdAt: resolvedAt
+                });
+                return { game, report, audit };
+            });
+            res.locals.gameId = result.game.id;
+            logger.info('moderation_report_resolved', {
+                requestId: req.requestId,
+                gameId: result.game.id,
+                reportId: result.report.id,
+                operatorUid: req.auth.uid,
+                status,
+                moderationState: result.game.moderationState,
+                actionId: result.audit.id
+            });
+            res.json({ success: true, data: { report: result.report, game: result.game, actionId: result.audit.id } });
+        } catch (error) {
+            if (error?.code === 'REPORT_ALREADY_RESOLVED') {
+                return res.status(409).json({ success: false, error: { code: error.code, message: error.message } });
+            }
+            logger.error('moderation_report_resolution_failed', { requestId: req.requestId, reportId: req.params.reportId, operatorUid: req.auth.uid, error });
+            res.status(500).json({ success: false, error: { code: 'MODERATION_ACTION_FAILED', message: 'Could not resolve the report.' } });
+        }
+    });
+
     // Discovery / retention layer. Platform owns selection, accounts and engagement data;
     // Player remains responsible only for executing the selected game.
     const allowedDiscoveryEvents = new Set([
         'impression', 'play_start', 'game_ready', 'next_game', 'session_end', 'game_error'
     ]);
 
-    const buildCatalogItem = async (game, userUid = null) => {
-        const version = await db.getPublishedGameVersion(game.id);
-        if (!version) return null;
-        const [developer, rating, engagement] = await Promise.all([
-            db.getUser(game.ownerUid),
-            db.getGameRatingSummary(game.id),
-            db.getGameDiscoveryStats(game.id)
-        ]);
-
-        const parseStringArray = value => {
-            try {
-                const parsed = JSON.parse(value || '[]');
-                return Array.isArray(parsed) ? parsed.filter(item => typeof item === 'string') : [];
-            } catch {
-                return [];
+    const buildCatalogItems = async (games, userUid = null) => {
+        const rows = await db.getCatalogRowsByGameIds(games.map(game => game.id), userUid);
+        const byId = new Map(rows.map(row => [row.gameId, row]));
+        return games.map(game => {
+            const row = byId.get(game.id);
+            if (!row) return null;
+            const item = catalogRowToItem(row);
+            if (userUid) {
+                item.userState = {
+                    inLibrary: Boolean(row.inLibrary),
+                    userRating: row.userRating == null ? null : Number(row.userRating),
+                    followingDeveloper: Boolean(row.followingDeveloper)
+                };
             }
-        };
-        const parseControls = value => {
-            try {
-                const parsed = JSON.parse(value || '[]');
-                return Array.isArray(parsed)
-                    ? parsed.filter(item => item && typeof item.action === 'string' && typeof item.key === 'string')
-                    : [];
-            } catch {
-                return [];
-            }
-        };
-        const capabilities = parseStringArray(version.capabilities);
-        const tags = parseStringArray(version.tags);
-        const controls = parseControls(version.controls);
-        const thumbnailUrl = version.thumbnail && version.runtimeUrl
-            ? `${version.runtimeUrl}/${version.thumbnail.split('/').map(segment => encodeURIComponent(segment)).join('/')}`
-            : null;
-
-        const item = {
-            gameId: game.id,
-            versionId: version.id,
-            name: game.title,
-            description: game.description,
-            gameVersion: version.version,
-            runtime: version.runtime,
-            capabilities,
-            thumbnailUrl,
-            tags,
-            controls,
-            streamingEnabled: Boolean(version.streamingManifestPath),
-            publishedAt: version.publishedAt || version.createdAt,
-            developerUid: game.ownerUid,
-            developer: developer?.displayName || developer?.email || 'Unknown Developer',
-            developerAvatarUrl: developer?.avatarUrl || '',
-            rating: rating.average,
-            ratingCount: rating.count,
-            playCount: engagement.playStarts,
-            avgSessionDurationMs: engagement.avgSessionDurationMs
-        };
-
-        if (userUid) {
-            const [inLibrary, userRating, followingDeveloper] = await Promise.all([
-                db.isInLibrary(userUid, game.id),
-                db.getUserGameRating(userUid, game.id),
-                userUid === game.ownerUid ? false : db.isFollowingDeveloper(userUid, game.ownerUid)
-            ]);
-            item.userState = { inLibrary, userRating, followingDeveloper };
-        }
-        return item;
+            return item;
+        }).filter(Boolean);
     };
 
+    const buildCatalogItem = async (game, userUid = null) => (await buildCatalogItems([game], userUid))[0] || null;
+
     const rankDiscoveryGames = async (games, userUid = null) => {
-        const recentRows = userUid ? await db.listRecentlyPlayedGameIds(userUid, 50) : [];
-        const libraryIds = userUid ? await db.listLibraryGameIds(userUid) : [];
+        const [recentRows, libraryIds, catalogRows] = await Promise.all([
+            userUid ? db.listRecentlyPlayedGameIds(userUid, 50) : [],
+            userUid ? db.listLibraryGameIds(userUid) : [],
+            db.getCatalogRowsByGameIds(games.map(game => game.id))
+        ]);
         const recent = new Set(recentRows.map(row => row.gameId));
         const library = new Set(libraryIds);
+        const statsById = new Map(catalogRows.map(row => [row.gameId, row]));
         const now = Date.now();
 
         const ranked = [];
         for (const game of games) {
-            const [rating, engagement] = await Promise.all([
-                db.getGameRatingSummary(game.id),
-                db.getGameDiscoveryStats(game.id)
-            ]);
+            const stats = statsById.get(game.id);
+            if (!stats) continue;
+            const rating = { average: Number(stats.rating || 0), count: Number(stats.ratingCount || 0) };
+            const engagement = {
+                playStarts: Number(stats.playCount || 0),
+                readyCount: Number(stats.readyCount || 0),
+                nextCount: Number(stats.nextCount || 0),
+                errorCount: Number(stats.errorCount || 0)
+            };
             const publishedAt = Number(game.latestPublishedAt || game.updatedAt || game.createdAt || now);
             const ageDays = Math.max(0, (now - publishedAt) / 86400000);
             const freshness = Math.max(0, 3 - Math.min(ageDays / 14, 3));
@@ -1071,7 +1600,7 @@ export function createApp(injectedDb, injectedStorage, jobQueue, options = {}) {
                 return res.status(400).json({ success: false, error: { code: 'INVALID_EVENT', message: 'Invalid discovery event.' } });
             }
             const game = await db.getGame(gameId);
-            if (!game || !await db.getPublishedGameVersion(gameId)) {
+            if (!game || game.moderationState !== 'ACTIVE' || !await db.getPublishedGameVersion(gameId)) {
                 return res.status(404).json({ success: false, error: { code: 'NOT_PUBLISHED', message: 'Game is not published.' } });
             }
             const event = await db.recordDiscoveryEvent({
@@ -1090,7 +1619,7 @@ export function createApp(injectedDb, injectedStorage, jobQueue, options = {}) {
         }
     });
 
-    app.get('/api/discovery/play-now', optionalAuth, async (req, res) => {
+    app.get('/api/discovery/play-now', optionalAuth, rlDiscoveryRead, async (req, res) => {
         try {
             const excludedGameIds = parseDiscoveryExclusions(req.query.exclude);
             const games = (await db.listPublishedGames()).filter(game => !excludedGameIds.has(game.id));
@@ -1113,7 +1642,7 @@ export function createApp(injectedDb, injectedStorage, jobQueue, options = {}) {
         }
     });
 
-    app.get('/api/discovery/trending', async (req, res) => {
+    app.get('/api/discovery/trending', rlDiscoveryRead, async (req, res) => {
         try {
             const limit = Math.max(1, Math.min(Number(req.query.limit) || 8, 24));
             const rankedRows = await db.listTrendingGameIds(limit);
@@ -1125,7 +1654,7 @@ export function createApp(injectedDb, injectedStorage, jobQueue, options = {}) {
                     if (orderedGames.length >= limit) break;
                 }
             }
-            const items = (await Promise.all(orderedGames.slice(0, limit).map(game => buildCatalogItem(game)))).filter(Boolean);
+            const items = await buildCatalogItems(orderedGames.slice(0, limit));
             res.json({ success: true, data: items });
         } catch (e) {
             console.error(e);
@@ -1133,13 +1662,13 @@ export function createApp(injectedDb, injectedStorage, jobQueue, options = {}) {
         }
     });
 
-    app.get('/api/discovery/recommendations', optionalAuth, async (req, res) => {
+    app.get('/api/discovery/recommendations', optionalAuth, rlDiscoveryRead, async (req, res) => {
         try {
             const limit = Math.max(1, Math.min(Number(req.query.limit) || 8, 24));
             const excludeGameId = typeof req.query.exclude === 'string' ? req.query.exclude : null;
             const games = (await db.listPublishedGames()).filter(game => game.id !== excludeGameId);
             const ranked = await rankDiscoveryGames(games, req.auth?.uid || null);
-            const items = (await Promise.all(ranked.slice(0, limit).map(({ game }) => buildCatalogItem(game, req.auth?.uid || null)))).filter(Boolean);
+            const items = await buildCatalogItems(ranked.slice(0, limit).map(({ game }) => game), req.auth?.uid || null);
             res.json({ success: true, data: items, meta: { personalized: Boolean(req.auth?.uid) } });
         } catch (e) {
             console.error(e);
@@ -1150,13 +1679,8 @@ export function createApp(injectedDb, injectedStorage, jobQueue, options = {}) {
     app.get('/api/library', requireAuth, ensureProfile, async (req, res) => {
         try {
             const ids = await db.listLibraryGameIds(req.auth.uid);
-            const items = [];
-            for (const id of ids) {
-                const game = await db.getGame(id);
-                if (!game) continue;
-                const item = await buildCatalogItem(game, req.auth.uid);
-                if (item) items.push(item);
-            }
+            const gamesById = new Map((await db.listPublishedGames()).map(game => [game.id, game]));
+            const items = await buildCatalogItems(ids.map(id => gamesById.get(id)).filter(Boolean), req.auth.uid);
             res.json({ success: true, data: items });
         } catch (e) {
             console.error(e);
@@ -1167,7 +1691,7 @@ export function createApp(injectedDb, injectedStorage, jobQueue, options = {}) {
     app.put('/api/library/:gameId', requireAuth, ensureProfile, async (req, res) => {
         try {
             const game = await db.getGame(req.params.gameId);
-            if (!game || !await db.getPublishedGameVersion(game.id)) {
+            if (!game || game.moderationState !== 'ACTIVE' || !await db.getPublishedGameVersion(game.id)) {
                 return res.status(404).json({ success: false, error: { code: 'NOT_PUBLISHED', message: 'Game is not published.' } });
             }
             const alreadyInLibrary = await db.isInLibrary(req.auth.uid, game.id);
@@ -1195,13 +1719,10 @@ export function createApp(injectedDb, injectedStorage, jobQueue, options = {}) {
     app.get('/api/continue-playing', requireAuth, ensureProfile, async (req, res) => {
         try {
             const recent = await db.listRecentlyPlayedGameIds(req.auth.uid, 12);
-            const items = [];
-            for (const row of recent) {
-                const game = await db.getGame(row.gameId);
-                if (!game) continue;
-                const item = await buildCatalogItem(game, req.auth.uid);
-                if (item) items.push({ ...item, lastPlayedAt: row.lastPlayedAt });
-            }
+            const gamesById = new Map((await db.listPublishedGames()).map(game => [game.id, game]));
+            const lastPlayedById = new Map(recent.map(row => [row.gameId, row.lastPlayedAt]));
+            const items = (await buildCatalogItems(recent.map(row => gamesById.get(row.gameId)).filter(Boolean), req.auth.uid))
+                .map(item => ({ ...item, lastPlayedAt: lastPlayedById.get(item.gameId) }));
             res.json({ success: true, data: items });
         } catch (e) {
             console.error(e);
@@ -1230,14 +1751,14 @@ export function createApp(injectedDb, injectedStorage, jobQueue, options = {}) {
         }
     });
 
-    app.put('/api/ratings/:gameId', requireAuth, ensureProfile, async (req, res) => {
+    app.put('/api/ratings/:gameId', requireAuth, ensureProfile, rlRatingWrite, async (req, res) => {
         try {
             const rating = Number(req.body?.rating);
             if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
                 return res.status(400).json({ success: false, error: { code: 'INVALID_RATING', message: 'Rating must be an integer from 1 to 5.' } });
             }
             const game = await db.getGame(req.params.gameId);
-            if (!game || !await db.getPublishedGameVersion(game.id)) {
+            if (!game || game.moderationState !== 'ACTIVE' || !await db.getPublishedGameVersion(game.id)) {
                 return res.status(404).json({ success: false, error: { code: 'NOT_PUBLISHED', message: 'Game is not published.' } });
             }
             await db.upsertGameRating(req.auth.uid, game.id, rating);
@@ -1250,7 +1771,7 @@ export function createApp(injectedDb, injectedStorage, jobQueue, options = {}) {
         }
     });
 
-    app.put('/api/developers/:uid/follow', requireAuth, ensureProfile, async (req, res) => {
+    app.put('/api/developers/:uid/follow', requireAuth, ensureProfile, rlFollowWrite, async (req, res) => {
         try {
             if (req.auth.uid === req.params.uid) {
                 return res.status(400).json({ success: false, error: { code: 'INVALID_FOLLOW', message: 'You cannot follow yourself.' } });
@@ -1265,7 +1786,7 @@ export function createApp(injectedDb, injectedStorage, jobQueue, options = {}) {
         }
     });
 
-    app.delete('/api/developers/:uid/follow', requireAuth, ensureProfile, async (req, res) => {
+    app.delete('/api/developers/:uid/follow', requireAuth, ensureProfile, rlFollowWrite, async (req, res) => {
         try {
             await db.unfollowDeveloper(req.auth.uid, req.params.uid);
             res.json({ success: true, data: { developerUid: req.params.uid, following: false } });
@@ -1279,7 +1800,7 @@ export function createApp(injectedDb, injectedStorage, jobQueue, options = {}) {
         try {
             const developers = await db.listFollowedDevelopers(req.auth.uid);
             const games = await db.listPublishedGamesByOwners(developers.map(dev => dev.uid).filter(Boolean));
-            const items = (await Promise.all(games.map(game => buildCatalogItem(game, req.auth.uid)))).filter(Boolean);
+            const items = await buildCatalogItems(games, req.auth.uid);
             res.json({ success: true, data: { developers, games: items } });
         } catch (e) {
             console.error(e);
@@ -1287,7 +1808,7 @@ export function createApp(injectedDb, injectedStorage, jobQueue, options = {}) {
         }
     });
 
-    app.get('/api/catalog/games', async (req, res) => {
+    app.get('/api/catalog/games', rlCatalogRead, async (req, res) => {
         try {
             const query = typeof req.query.q === 'string' ? req.query.q.trim() : '';
             const tag = typeof req.query.tag === 'string' ? req.query.tag.trim() : '';
@@ -1330,10 +1851,11 @@ export function createApp(injectedDb, injectedStorage, jobQueue, options = {}) {
         }
     });
 
-    app.get('/api/catalog/games/:id', optionalAuth, async (req, res) => {
+    app.get('/api/catalog/games/:id', optionalAuth, rlCatalogRead, async (req, res) => {
         try {
             const game = await db.getGame(req.params.id);
             if (!game) return res.status(404).json({ success: false, error: { code: 'NOT_FOUND', message: 'Game not found' } });
+            if (game.moderationState !== 'ACTIVE') return res.status(404).json({ success: false, error: { code: 'NOT_PUBLISHED', message: 'Game is not published' } });
             const version = await db.getPublishedGameVersion(game.id);
             if (!version) return res.status(404).json({ success: false, error: { code: 'NOT_PUBLISHED', message: 'Game is not published' } });
             if (!version.runtimeUrl) return res.status(503).json({ success: false, error: { code: 'RUNTIME_UNAVAILABLE', message: 'Published game runtime is unavailable.' } });

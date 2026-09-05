@@ -143,10 +143,10 @@ export function GameDetails() {
                 <div className="w-full md:w-2/3 aspect-video bg-neutral-900 rounded-2xl border border-neutral-800 flex items-center justify-center relative overflow-hidden">
                     <Gamepad2 className="w-24 h-24 text-neutral-800" />
                     {game.thumbnailUrl && <img src={game.thumbnailUrl} alt="" className="absolute inset-0 w-full h-full object-cover" onError={event => { event.currentTarget.hidden = true; }} />}
-                    <div className="absolute inset-0 bg-gradient-to-t from-black/80 to-transparent flex flex-col justify-end p-8">
-                        <h1 className="text-4xl md:text-5xl font-extrabold text-white mb-2">{game.title}</h1>
+                    <div className="absolute inset-0 bg-gradient-to-t from-black/80 to-transparent flex flex-col justify-end p-4 sm:p-8">
+                        <h1 className="text-3xl sm:text-4xl md:text-5xl font-extrabold text-white mb-2 [overflow-wrap:anywhere]">{game.title}</h1>
                         <div className="flex flex-wrap items-center gap-3 text-neutral-300">
-                            <span>By {game.developer || 'Unknown Developer'}</span>
+                            <span className="max-w-full [overflow-wrap:anywhere]">By {game.developer || 'Unknown Developer'}</span>
                             {game.streamingEnabled && <span className="inline-flex items-center gap-1.5 text-xs border border-blue-400/30 bg-blue-500/10 text-blue-300 px-2.5 py-1.5 rounded-full"><Radio className="w-3.5 h-3.5" />Streaming enabled</span>}
                             {game.developerUid && user?.uid !== game.developerUid && (
                                 <button onClick={toggleFollow} disabled={actionBusy} aria-pressed={following} className="inline-flex items-center gap-1.5 text-xs border border-neutral-700 bg-neutral-900/80 hover:bg-neutral-800 disabled:opacity-50 px-2.5 py-1.5 rounded-full">
@@ -160,7 +160,7 @@ export function GameDetails() {
 
                 <div className="w-full md:w-1/3 flex flex-col gap-4">
                     <div className="bg-neutral-900 border border-neutral-800 p-6 rounded-2xl">
-                        <button onClick={() => navigate(`/player/game/${game.id}/play`)} className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-4 rounded-xl flex items-center justify-center gap-2 transition-transform active:scale-95 mb-3">
+                        <button onClick={() => navigate(`/player/game/${game.id}/play`, { state: { fromDetails: true } })} className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-4 rounded-xl flex items-center justify-center gap-2 transition-transform active:scale-95 mb-3">
                             <Play className="w-5 h-5 fill-current" /> Play Now
                         </button>
                         <button onClick={toggleLibrary} disabled={actionBusy} aria-pressed={inLibrary} className={`w-full font-bold py-3 rounded-xl flex items-center justify-center gap-2 border transition-colors disabled:opacity-50 ${inLibrary ? 'bg-green-500/15 border-green-500/40 text-green-300' : 'bg-neutral-950 border-neutral-800 text-neutral-300 hover:bg-neutral-800'}`}>
@@ -200,8 +200,8 @@ export function GameDetails() {
             <div className="grid grid-cols-1 md:grid-cols-3 gap-12">
                 <div className="md:col-span-2">
                     <h2 className="text-2xl font-bold mb-4">About the Game</h2>
-                    <p className="text-neutral-400 leading-relaxed mb-8">{game.description}</p>
-                    {game.tags?.length > 0 && <><h2 className="text-2xl font-bold mb-4">Tags</h2><div className="flex flex-wrap gap-2">{game.tags.map(tag => <span key={tag} className="bg-neutral-900 border border-neutral-800 px-3 py-1.5 rounded-lg text-sm text-neutral-300">{tag}</span>)}</div></>}
+                    <p className="text-neutral-400 leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere] mb-8">{game.description}</p>
+                    {game.tags?.length > 0 && <><h2 className="text-2xl font-bold mb-4">Tags</h2><div className="flex flex-wrap gap-2">{game.tags.map(tag => <span key={tag} className="max-w-full bg-neutral-900 border border-neutral-800 px-3 py-1.5 rounded-lg text-sm text-neutral-300 [overflow-wrap:anywhere]">{tag}</span>)}</div></>}
                 </div>
                 {game.controls?.length > 0 && <div><h2 className="text-xl font-bold mb-4">Controls</h2><div className="bg-neutral-900 border border-neutral-800 rounded-xl p-4 flex flex-col gap-3">{game.controls.map((ctrl, i) => <div key={i} className="flex justify-between items-center text-sm"><span className="text-neutral-500">{ctrl.action}</span><span className="font-mono bg-neutral-950 px-2 py-1 rounded text-neutral-300 border border-neutral-800">{ctrl.key}</span></div>)}</div></div>}
             </div>

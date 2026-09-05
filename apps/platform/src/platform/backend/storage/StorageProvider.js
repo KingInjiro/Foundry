@@ -31,4 +31,8 @@ export class StorageProvider {
     async deletePrefix(_prefix) {
         throw new Error("Method not implemented.");
     }
+
+    async listObjects(_prefix) {
+        throw new Error("Method not implemented.");
+    }
 }

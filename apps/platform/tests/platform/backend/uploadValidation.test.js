@@ -24,9 +24,11 @@ describe('Upload Validation Pipeline', () => {
         app = createApp(db, storage);
     });
 
-    afterEach(() => {
-        db.db.close();
+    afterEach(async () => {
+        await app?.locals?.jobQueue?.stop?.();
+        await db?.close();
         vi.restoreAllMocks();
+        delete process.env.AUTH_DEV_BYPASS;
     });
 
     it('Valid ZIP uploaded directly to R2 -> VALID', async () => {

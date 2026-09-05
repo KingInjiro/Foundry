@@ -37,7 +37,7 @@ npm run local:reset
 
 See `apps/platform/README.md` for connected Firebase/R2 development, package requirements, and browser-test setup.
 
-Build the web application:
+Build the web application. Production builds require the four public `VITE_FIREBASE_*` identifiers documented in `apps/platform/.env.example`; the generated deployment profile is checked against runtime Firebase Admin before production startup:
 
 ```bash
 npm run build
@@ -60,3 +60,5 @@ Run browser E2E tests:
 ```bash
 npm run test:e2e
 ```
+
+For the controlled staging process, cloud verification, backup/restore, moderation provisioning, and rollback gates, use [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md) and [apps/platform/DEPLOYMENT_RUNBOOK.md](apps/platform/DEPLOYMENT_RUNBOOK.md).

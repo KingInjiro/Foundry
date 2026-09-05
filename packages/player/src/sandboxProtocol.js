@@ -3,6 +3,8 @@ export const SANDBOX_PROTOCOL_VERSION = 1;
 export const SANDBOX_MESSAGE_TYPES = Object.freeze({
     SANDBOX_READY: 'SANDBOX_READY',
     RUN_GAME: 'RUN_GAME',
+    RUN_WEB_GAME: 'RUN_WEB_GAME',
+    GAME_BOOTING: 'GAME_BOOTING',
     GAME_READY: 'GAME_READY',
     GAME_ERROR: 'GAME_ERROR',
     GAME_LOG: 'GAME_LOG',
@@ -160,7 +162,8 @@ export function normalizeRunRequest(data, expectedOrigin) {
             recoverState: capabilities.includes('storage') && typeof payload.recoverState === 'string'
                 ? payload.recoverState
                 : null,
-            streamingManifest: payload.streamingManifest || null
+            streamingManifest: payload.streamingManifest || null,
+            allowEditorCommands: legacy
         }
     };
 }

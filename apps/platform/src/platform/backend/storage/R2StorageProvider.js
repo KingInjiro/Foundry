@@ -14,6 +14,10 @@ export class R2StorageProvider extends StorageProvider {
         this.bucketName = process.env.R2_BUCKET_NAME;
         this.isConfigured = !!(accountId && accessKeyId && secretAccessKey && this.bucketName && endpoint);
         this.directDownloadsEnabled = this.isConfigured && process.env.R2_DIRECT_DOWNLOADS === 'true';
+        const configuredUploadTtl = Number(process.env.R2_UPLOAD_URL_TTL_SECONDS);
+        this.uploadUrlTtlSeconds = Number.isFinite(configuredUploadTtl)
+            ? Math.max(60, Math.min(Math.floor(configuredUploadTtl), 3600))
+            : 900;
         const configuredDownloadTtl = Number(process.env.R2_DOWNLOAD_URL_TTL_SECONDS);
         this.downloadUrlTtlSeconds = Number.isFinite(configuredDownloadTtl)
             ? Math.max(30, Math.min(Math.floor(configuredDownloadTtl), 900))
@@ -40,7 +44,7 @@ export class R2StorageProvider extends StorageProvider {
             Key: objectKey,
             ContentType: contentType
         });
-        const url = await getSignedUrl(this.client, command, { expiresIn: 3600 });
+        const url = await getSignedUrl(this.client, command, { expiresIn: this.uploadUrlTtlSeconds });
         return { uploadUrl: url };
     }
 
@@ -154,5 +158,33 @@ export class R2StorageProvider extends StorageProvider {
                 ? response.NextContinuationToken
                 : undefined;
         } while (continuationToken);
+    }
+
+    async listObjects(prefix) {
+        if (!this.isConfigured) {
+            throw new Error("R2 is not configured in this environment.");
+        }
+        const normalizedPrefix = String(prefix || '').replace(/^\/+/, '');
+        if (!normalizedPrefix) throw new Error('Refusing to list an empty R2 prefix.');
+        const objects = [];
+        let continuationToken;
+        do {
+            const response = await this.client.send(new ListObjectsV2Command({
+                Bucket: this.bucketName,
+                Prefix: normalizedPrefix,
+                ...(continuationToken && { ContinuationToken: continuationToken })
+            }));
+            for (const object of response.Contents || []) {
+                if (!object.Key) continue;
+                objects.push({
+                    key: object.Key,
+                    size: Number(object.Size || 0),
+                    lastModified: object.LastModified || null,
+                    etag: object.ETag || null
+                });
+            }
+            continuationToken = response.IsTruncated ? response.NextContinuationToken : undefined;
+        } while (continuationToken);
+        return objects;
     }
 }

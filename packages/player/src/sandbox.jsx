@@ -554,7 +554,7 @@ function startGame(runRequest) {
             postRuntimeMessage(
                 SANDBOX_MESSAGE_TYPES.GAME_LOG,
                 { level: e.data.level || 'log', message: e.data.msg, launchId: activeLaunchId },
-                { type: 'worker_log', msg: e.data.msg }
+                { type: 'log', level: e.data.level || 'log', msg: e.data.msg }
             );
         } else if (e.data.type === 'snapshot') {
             window.lastWorkerPing = Date.now();
@@ -625,7 +625,9 @@ window.addEventListener('message', (event) => {
         if (data.payload?.launchId === activeLaunchId && engineWorker) {
             engineWorker.postMessage({ type: 'disable_autosave' });
         }
-    } else if (data.type === 'pause' || data.type === 'stop' || data.type === 'eval' || data.type === 'update-code') {
+    } else if (data.type === 'eval') {
+        if (parentProtocol === 'legacy' && engineWorker) engineWorker.postMessage(data);
+    } else if (data.type === 'pause' || data.type === 'stop' || data.type === 'update-code') {
         if (engineWorker) engineWorker.postMessage(data);
     } else if (data.type === 'audio_command') {
         if (sandboxAudio) sandboxAudio.handleCommand(data);
