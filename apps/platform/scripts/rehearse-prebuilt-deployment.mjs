@@ -96,6 +96,27 @@ while [[ "$#" -gt 0 ]]; do
         *) break ;;
     esac
 done
+release_directory=""
+access_check=false
+for arg in "$@"; do
+    case "$arg" in
+        FOUNDRY_RELEASE_ACCESS_CHECK=1) access_check=true ;;
+        FOUNDRY_RELEASE_DIRECTORY=*) release_directory="\${arg#*=}" ;;
+    esac
+done
+if [[ "\${access_check}" == true ]]; then
+    [[ -n "\${release_directory}" ]]
+    server_bundle="\${release_directory}/apps/platform/dist/server.cjs"
+    chmod 0550 "\${release_directory}"
+    chmod 0440 "\${server_bundle}"
+    set +e
+    "$@"
+    status="$?"
+    set -e
+    chmod 0750 "\${release_directory}"
+    chmod 0640 "\${server_bundle}"
+    exit "\${status}"
+fi
 exec "$@"
 `);
 executable(path.join(bin, 'systemctl'), `#!/usr/bin/env bash
