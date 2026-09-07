@@ -144,9 +144,10 @@ jobs:
           : "${SSH_HOST_KEY:?Set the production secret FOUNDRY_DEPLOY_HOST_KEY}"
           case "${PUBLIC_URL}" in https://*) ;; *) echo 'FOUNDRY_PUBLIC_URL must use HTTPS.' >&2; exit 1 ;; esac
           install -d -m 0700 "${RUNNER_TEMP}/foundry-ssh"
-          printf '%s\n' "${SSH_PRIVATE_KEY}" > "${RUNNER_TEMP}/foundry-ssh/id"
-          printf '%s\n' "${SSH_HOST_KEY}" > "${RUNNER_TEMP}/foundry-ssh/known_hosts"
+          printf '%b\n' "${SSH_PRIVATE_KEY}" | tr -d '\r' > "${RUNNER_TEMP}/foundry-ssh/id"
+          printf '%s\n' "${SSH_HOST_KEY}" | tr -d '\r' > "${RUNNER_TEMP}/foundry-ssh/known_hosts"
           chmod 0600 "${RUNNER_TEMP}/foundry-ssh/id" "${RUNNER_TEMP}/foundry-ssh/known_hosts"
+          ssh-keygen -y -f "${RUNNER_TEMP}/foundry-ssh/id" >/dev/null
 
       - name: Transfer, verify, and atomically update Foundry
         run: |
