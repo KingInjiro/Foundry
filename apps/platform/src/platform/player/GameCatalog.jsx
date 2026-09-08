@@ -7,8 +7,8 @@ import { useAuth } from '../auth/AuthContext.jsx';
 import { trackDiscoveryEvent } from '../discovery/telemetry.js';
 import { CATALOG_SORT_OPTIONS, normalizeCatalogSort } from './catalogFilters.js';
 
-async function loadDiscoveryEndpoint(endpoint) {
-    const response = await apiClient.get(endpoint);
+async function loadDiscoveryEndpoint(endpoint, signal) {
+    const response = await apiClient.get(endpoint, { signal });
     const result = await response.json();
     if (!response.ok || !result.success) throw new Error(result.error?.message || 'Discovery request failed.');
     return result;
@@ -43,7 +43,7 @@ function GameCard({ game, onTagSelect = null }) {
                 <div className="absolute inset-0 bg-black/45 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity flex items-center justify-center"><div className="bg-blue-500 text-white rounded-full p-3 shadow-lg"><Play className="w-6 h-6 fill-current" /></div></div>
             </button>
             <div className="p-4">
-                <button type="button" onClick={() => navigate(`/player/game/${game.gameId}`)} className="text-left w-full focus-visible:outline-none">
+                <button type="button" onClick={() => navigate(`/player/game/${game.gameId}`)} className="text-left w-full rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500">
                     <h3 className="font-bold text-lg hover:text-blue-300 focus-visible:text-blue-300 transition-colors truncate">{game.name}</h3>
                     <p className="text-neutral-500 text-sm mt-1 mb-3 line-clamp-2 min-h-10">{game.description || 'No description available.'}</p>
                 </button>
@@ -100,6 +100,8 @@ export function GameCatalog() {
     const [popularTags, setPopularTags] = useState([]);
     const [nextCursor, setNextCursor] = useState(null);
     const [loadingMore, setLoadingMore] = useState(false);
+    const [loadMoreError, setLoadMoreError] = useState('');
+    const catalogRequestRef = useRef(null);
 
     const query = searchParams.get('q') || '';
     const selectedTag = searchParams.get('tag') || '';
@@ -131,24 +133,28 @@ export function GameCatalog() {
     };
 
     useEffect(() => {
-        let cancelled = false;
+        const controller = new AbortController();
+        catalogRequestRef.current = controller;
         const load = async () => {
             setLoading(true);
             setLoadError('');
+            setLoadMoreError('');
+            setLoadingMore(false);
+            setNextCursor(null);
             try {
-                const catalogResult = await loadDiscoveryEndpoint(catalogEndpoint());
-                if (cancelled) return;
+                const catalogResult = await loadDiscoveryEndpoint(catalogEndpoint(), controller.signal);
+                if (controller.signal.aborted) return;
                 setGames(catalogResult.data || []);
                 setPopularTags(catalogResult.meta?.popularTags || []);
                 setNextCursor(catalogResult.meta?.nextCursor || null);
             } catch (error) {
-                if (!cancelled) setLoadError(error.message || 'Could not load playable games.');
+                if (!controller.signal.aborted) setLoadError(error.message || 'Could not load playable games.');
             } finally {
-                if (!cancelled) setLoading(false);
+                if (!controller.signal.aborted) setLoading(false);
             }
         };
         void load();
-        return () => { cancelled = true; };
+        return () => controller.abort();
     }, [debouncedQuery, selectedTag, sort, reloadKey]);
 
     useEffect(() => {
@@ -173,11 +179,13 @@ export function GameCatalog() {
     }, [user?.uid, reloadKey]);
 
     const loadMore = async () => {
-        if (!nextCursor || loadingMore) return;
+        const controller = catalogRequestRef.current;
+        if (!nextCursor || loading || loadingMore || query.trim() !== debouncedQuery || !controller || controller.signal.aborted) return;
         setLoadingMore(true);
-        setLoadError('');
+        setLoadMoreError('');
         try {
-            const result = await loadDiscoveryEndpoint(catalogEndpoint(nextCursor));
+            const result = await loadDiscoveryEndpoint(catalogEndpoint(nextCursor), controller.signal);
+            if (controller.signal.aborted) return;
             setGames(current => {
                 const byId = new Map(current.map(game => [game.gameId, game]));
                 for (const game of result.data || []) byId.set(game.gameId, game);
@@ -185,9 +193,9 @@ export function GameCatalog() {
             });
             setNextCursor(result.meta?.nextCursor || null);
         } catch (error) {
-            setLoadError(error.message || 'Could not load more games.');
+            if (!controller.signal.aborted) setLoadMoreError(error.message || 'Could not load more games.');
         } finally {
-            setLoadingMore(false);
+            if (!controller.signal.aborted) setLoadingMore(false);
         }
     };
 
@@ -221,63 +229,60 @@ export function GameCatalog() {
                 <PlayNowButton label="Play Something Now" />
             </section>
 
-            {loading ? <CatalogSkeleton /> : loadError ? (
-                <div className="border border-red-500/20 bg-red-500/5 rounded-2xl p-8 text-center">
-                    <div className="text-red-300 font-bold mb-2">Discovery is temporarily unavailable</div>
-                    <p className="text-neutral-500 mb-5">{loadError}</p>
-                    <button type="button" onClick={() => setReloadKey(value => value + 1)} className="bg-neutral-800 hover:bg-neutral-700 px-5 py-2.5 rounded-lg font-bold">Try Again</button>
+            <GameSection title={personalized ? 'Recommended for You' : 'Worth Trying'} description={personalized ? 'Deprioritizes games you already played or kept.' : 'A quality-and-freshness ranking until you sign in and build play history.'} icon={Sparkles} games={recommended} />
+            <GameSection title="Trending Now" description="Driven by launches, successful game starts, ratings and library saves from the last week." icon={Flame} games={trending} />
+            <section id="all-games">
+                <div className="mb-5 flex flex-col md:flex-row md:items-end justify-between gap-4">
+                    <div><div className="flex items-center gap-2"><Clock3 className="w-5 h-5 text-neutral-400" /><h2 className="text-2xl md:text-3xl font-extrabold">All Playable Games</h2></div><p className="text-neutral-500 mt-1">Search when you already know what you want.</p></div>
+                    <div className="flex flex-col sm:flex-row gap-3 w-full md:w-auto">
+                        <div className="relative w-full md:w-72">
+                            <label htmlFor="catalog-search" className="sr-only">Search games</label>
+                            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-500" />
+                            <input id="catalog-search" value={query} onChange={event => setFilter('q', event.target.value)} maxLength={120} placeholder="Search games, tags or developers" className="w-full bg-neutral-900 border border-neutral-800 rounded-xl py-2.5 pl-10 pr-10 text-sm outline-none focus:border-blue-500" />
+                            {query && <button type="button" onClick={() => setFilter('q', '')} className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-neutral-500 hover:text-white" aria-label="Clear search"><X className="w-4 h-4" /></button>}
+                        </div>
+                        <label>
+                            <span className="sr-only">Sort games</span>
+                            <select value={sort} onChange={event => setFilter('sort', event.target.value)} className="w-full sm:w-auto bg-neutral-900 border border-neutral-800 rounded-xl py-2.5 px-3 text-sm outline-none focus:border-blue-500">
+                                {CATALOG_SORT_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+                            </select>
+                        </label>
+                    </div>
                 </div>
-            ) : games.length === 0 && !query && !selectedTag && sort === 'featured' && !trending.length && !recommended.length ? (
-                <div className="border border-neutral-800 bg-neutral-900/50 rounded-2xl p-10 text-center"><Gamepad2 className="w-12 h-12 mx-auto text-neutral-700 mb-4" /><div className="text-white font-bold text-lg mb-2">No published games yet</div><div className="text-neutral-500">Discovery becomes useful as soon as developers publish playable games.</div></div>
-            ) : (
-                <>
-                    <GameSection title={personalized ? 'Recommended for You' : 'Worth Trying'} description={personalized ? 'Deprioritizes games you already played or kept.' : 'A quality-and-freshness ranking until you sign in and build play history.'} icon={Sparkles} games={recommended} />
-                    <GameSection title="Trending Now" description="Driven by launches, successful game starts, ratings and library saves from the last week." icon={Flame} games={trending} />
-                    <section id="all-games">
-                        <div className="mb-5 flex flex-col md:flex-row md:items-end justify-between gap-4">
-                            <div><div className="flex items-center gap-2"><Clock3 className="w-5 h-5 text-neutral-400" /><h2 className="text-2xl md:text-3xl font-extrabold">All Playable Games</h2></div><p className="text-neutral-500 mt-1">Search when you already know what you want.</p></div>
-                            <div className="flex flex-col sm:flex-row gap-3 w-full md:w-auto">
-                                <label className="relative w-full md:w-72">
-                                    <span className="sr-only">Search games</span>
-                                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-500" />
-                                    <input value={query} onChange={event => setFilter('q', event.target.value)} maxLength={120} placeholder="Search games, tags or developers" className="w-full bg-neutral-900 border border-neutral-800 rounded-xl py-2.5 pl-10 pr-10 text-sm outline-none focus:border-blue-500" />
-                                    {query && <button type="button" onClick={() => setFilter('q', '')} className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-neutral-500 hover:text-white" aria-label="Clear search"><X className="w-4 h-4" /></button>}
-                                </label>
-                                <label>
-                                    <span className="sr-only">Sort games</span>
-                                    <select value={sort} onChange={event => setFilter('sort', event.target.value)} className="w-full sm:w-auto bg-neutral-900 border border-neutral-800 rounded-xl py-2.5 px-3 text-sm outline-none focus:border-blue-500">
-                                        {CATALOG_SORT_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
-                                    </select>
-                                </label>
-                            </div>
-                        </div>
-                        {popularTags.length > 0 && (
-                            <div className="flex flex-wrap items-center gap-2 mb-5" aria-label="Filter by tag">
-                                <Tags className="w-4 h-4 text-neutral-500" aria-hidden="true" />
-                                {popularTags.map(({ label, count }) => (
-                                    <button key={label.toLocaleLowerCase()} type="button" onClick={() => setFilter('tag', selectedTag.toLocaleLowerCase() === label.toLocaleLowerCase() ? '' : label)} aria-pressed={selectedTag.toLocaleLowerCase() === label.toLocaleLowerCase()} className={`rounded-full border px-3 py-1 text-xs transition-colors ${selectedTag.toLocaleLowerCase() === label.toLocaleLowerCase() ? 'border-blue-500/60 bg-blue-500/15 text-blue-300' : 'border-neutral-800 bg-neutral-900 text-neutral-400 hover:border-neutral-700 hover:text-white'}`}>
-                                        {label} <span className="text-neutral-600">{count}</span>
-                                    </button>
-                                ))}
-                                {(query || selectedTag || sort !== 'featured') && <button type="button" onClick={clearFilters} className="text-xs text-blue-400 hover:text-blue-300 px-2 py-1">Clear filters</button>}
-                            </div>
-                        )}
-                        {games.length ? (
-                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">{games.map(game => <GameCard key={game.gameId} game={game} onTagSelect={tag => setFilter('tag', tag)} />)}</div>
-                        ) : (
-                            <div className="border border-dashed border-neutral-800 rounded-xl p-8 text-center text-neutral-500">No games match the current filters. <button type="button" onClick={clearFilters} className="text-blue-400 hover:text-blue-300">Clear filters</button></div>
-                        )}
-                        <div className="mt-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                            <div className="text-xs text-neutral-600">Loaded {games.length} playable {games.length === 1 ? 'game' : 'games'}</div>
-                            {nextCursor && (
-                                <button type="button" onClick={() => void loadMore()} disabled={loadingMore} className="inline-flex items-center justify-center gap-2 rounded-lg border border-neutral-700 bg-neutral-900 px-4 py-2 text-sm font-bold hover:bg-neutral-800 disabled:opacity-50">
-                                    {loadingMore && <LoaderCircle className="h-4 w-4 animate-spin" />}{loadingMore ? 'Loading…' : 'Load More'}
-                                </button>
-                            )}
-                        </div>
-                    </section>
-                </>
-            )}
+                {(popularTags.length > 0 || query || selectedTag || sort !== 'featured') && (
+                    <div className="flex flex-wrap items-center gap-2 mb-5" aria-label="Filter by tag">
+                        <Tags className="w-4 h-4 text-neutral-500" aria-hidden="true" />
+                        {popularTags.map(({ label, count }) => (
+                            <button key={label.toLocaleLowerCase()} type="button" onClick={() => setFilter('tag', selectedTag.toLocaleLowerCase() === label.toLocaleLowerCase() ? '' : label)} aria-pressed={selectedTag.toLocaleLowerCase() === label.toLocaleLowerCase()} className={`rounded-full border px-3 py-1 text-xs transition-colors ${selectedTag.toLocaleLowerCase() === label.toLocaleLowerCase() ? 'border-blue-500/60 bg-blue-500/15 text-blue-300' : 'border-neutral-800 bg-neutral-900 text-neutral-400 hover:border-neutral-700 hover:text-white'}`}>
+                                {label} <span className="text-neutral-600">{count}</span>
+                            </button>
+                        ))}
+                        {(query || selectedTag || sort !== 'featured') && <button type="button" onClick={clearFilters} className="text-xs text-blue-400 hover:text-blue-300 px-2 py-1">Clear filters</button>}
+                    </div>
+                )}
+                {loading ? <CatalogSkeleton /> : loadError ? (
+                    <div role="alert" className="border border-red-500/20 bg-red-500/5 rounded-2xl p-8 text-center">
+                        <div className="text-red-300 font-bold mb-2">Discovery is temporarily unavailable</div>
+                        <p className="text-neutral-400 mb-5">{loadError}</p>
+                        <button type="button" onClick={() => setReloadKey(value => value + 1)} className="bg-neutral-800 hover:bg-neutral-700 px-5 py-2.5 rounded-lg font-bold">Try Again</button>
+                    </div>
+                ) : games.length ? (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">{games.map(game => <GameCard key={game.gameId} game={game} onTagSelect={tag => setFilter('tag', tag)} />)}</div>
+                ) : !query && !selectedTag && sort === 'featured' && !trending.length && !recommended.length ? (
+                    <div className="border border-neutral-800 bg-neutral-900/50 rounded-2xl p-10 text-center"><Gamepad2 className="w-12 h-12 mx-auto text-neutral-700 mb-4" /><div className="text-white font-bold text-lg mb-2">No published games yet</div><div className="text-neutral-500">Discovery becomes useful as soon as developers publish playable games.</div></div>
+                ) : (
+                    <div className="border border-dashed border-neutral-800 rounded-xl p-8 text-center text-neutral-500">No games match the current filters. <button type="button" onClick={clearFilters} className="text-blue-400 hover:text-blue-300">Clear filters</button></div>
+                )}
+                {!loading && !loadError && <div className="mt-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="text-xs text-neutral-400" role="status">Loaded {games.length} playable {games.length === 1 ? 'game' : 'games'}</div>
+                    {loadMoreError && <p role="alert" className="text-sm text-red-300">{loadMoreError} Your loaded games are still available.</p>}
+                    {nextCursor && (
+                        <button type="button" onClick={() => void loadMore()} disabled={loadingMore || query.trim() !== debouncedQuery} className="inline-flex items-center justify-center gap-2 rounded-lg border border-neutral-700 bg-neutral-900 px-4 py-2 text-sm font-bold hover:bg-neutral-800 disabled:opacity-50">
+                            {loadingMore && <LoaderCircle className="h-4 w-4 animate-spin" />}{loadingMore ? 'Loading…' : loadMoreError ? 'Retry Load More' : 'Load More'}
+                        </button>
+                    )}
+                </div>}
+            </section>
         </main>
     );
 }

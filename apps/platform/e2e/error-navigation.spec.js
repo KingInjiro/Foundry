@@ -12,6 +12,46 @@ test.describe('Negative and recovery navigation', () => {
     expect(reset.ok()).toBeTruthy();
   });
 
+  test('search retains focus during loading and pagination failure retains playable results', async ({ page }) => {
+    let releaseSearch;
+    const searchGate = new Promise(resolve => { releaseSearch = resolve; });
+    let failNextPage = true;
+    await page.route('**/api/catalog/games?**', async route => {
+      const params = new URL(route.request().url()).searchParams;
+      if (params.has('cursor') && failNextPage) {
+        return route.fulfill({ status: 500, json: { success: false, error: { message: 'Next page unavailable.' } } });
+      }
+      if (params.get('q') === 'beta') await searchGate;
+      const name = params.has('cursor') ? 'Gamma' : params.get('q') === 'beta' ? 'Beta' : 'Alpha';
+      await route.fulfill({ json: {
+        success: true,
+        data: [{ gameId: name.toLowerCase(), name, description: 'Catalog regression fixture' }],
+        meta: { nextCursor: params.has('cursor') ? null : 'page-2' }
+      } });
+    });
+    try {
+      await page.goto('/player');
+      await expect(page.getByRole('heading', { name: 'Alpha', exact: true })).toBeVisible();
+      const search = page.getByRole('textbox', { name: 'Search games', exact: true });
+      await search.fill('beta');
+      await expect(page.getByRole('status', { name: 'Loading games' })).toBeVisible();
+      await expect(search).toBeFocused();
+      releaseSearch();
+      await expect(page.getByRole('heading', { name: 'Beta', exact: true })).toBeVisible();
+      await expect(search).toBeFocused();
+      await page.getByRole('button', { name: 'Load More', exact: true }).click();
+      await expect(page.getByRole('alert')).toContainText('Next page unavailable.');
+      await expect(page.getByRole('button', { name: 'Play Beta', exact: true })).toBeVisible();
+      failNextPage = false;
+      await page.getByRole('button', { name: 'Retry Load More', exact: true }).click();
+      await expect(page.getByRole('heading', { name: 'Gamma', exact: true })).toBeVisible();
+      await expect(page.getByRole('heading', { name: 'Beta', exact: true })).toBeVisible();
+      await expect(page.getByRole('alert')).toHaveCount(0);
+    } finally {
+      releaseSearch();
+    }
+  });
+
   for (const status of [429, 500]) {
     test(`catalog exposes HTTP ${status} and recovers in place`, async ({ page }) => {
       const diagnostics = collectRuntimeDiagnostics(page);

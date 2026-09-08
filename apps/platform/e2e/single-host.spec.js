@@ -74,6 +74,22 @@ test.describe.serial('production-like single-host acceptance', () => {
     const runtimeErrors = watchRuntime(page);
     const landing = await page.goto('/');
     expect(landing.headers()['strict-transport-security']).toContain('max-age=');
+    const signIn = page.getByRole('button', { name: 'Sign In', exact: true });
+    await signIn.click();
+    const keyboardDialog = page.getByRole('dialog');
+    await expect(keyboardDialog.getByLabel('Username')).toBeFocused();
+    await keyboardDialog.getByRole('button', { name: 'Sign In', exact: true }).focus();
+    await page.keyboard.press('Tab');
+    await expect(keyboardDialog.getByRole('button', { name: 'Close authentication dialog' })).toBeFocused();
+    await page.keyboard.press('Shift+Tab');
+    await expect(keyboardDialog.getByRole('button', { name: 'Sign In', exact: true })).toBeFocused();
+    await keyboardDialog.getByRole('tab', { name: 'Sign In', exact: true }).focus();
+    await page.keyboard.press('ArrowRight');
+    await expect(keyboardDialog.getByRole('tab', { name: 'Register' })).toBeFocused();
+    await expect(keyboardDialog.getByLabel('Password')).toHaveAccessibleDescription(/at least 12 characters/);
+    await page.keyboard.press('Escape');
+    await expect(keyboardDialog).toBeHidden();
+    await expect(signIn).toBeFocused();
     const registered = await register(page, 'local-session-user', 'Local Session User');
     expect(registered.user.role).toBe('DEVELOPER');
 
