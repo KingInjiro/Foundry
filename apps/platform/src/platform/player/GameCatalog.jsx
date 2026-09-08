@@ -235,12 +235,12 @@ export function GameCatalog() {
                 <div className="mb-5 flex flex-col md:flex-row md:items-end justify-between gap-4">
                     <div><div className="flex items-center gap-2"><Clock3 className="w-5 h-5 text-neutral-400" /><h2 className="text-2xl md:text-3xl font-extrabold">All Playable Games</h2></div><p className="text-neutral-500 mt-1">Search when you already know what you want.</p></div>
                     <div className="flex flex-col sm:flex-row gap-3 w-full md:w-auto">
-                        <label className="relative w-full md:w-72">
-                            <span className="sr-only">Search games</span>
+                        <div className="relative w-full md:w-72">
+                            <label htmlFor="catalog-search" className="sr-only">Search games</label>
                             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-500" />
-                            <input value={query} onChange={event => setFilter('q', event.target.value)} maxLength={120} placeholder="Search games, tags or developers" className="w-full bg-neutral-900 border border-neutral-800 rounded-xl py-2.5 pl-10 pr-10 text-sm outline-none focus:border-blue-500" />
+                            <input id="catalog-search" value={query} onChange={event => setFilter('q', event.target.value)} maxLength={120} placeholder="Search games, tags or developers" className="w-full bg-neutral-900 border border-neutral-800 rounded-xl py-2.5 pl-10 pr-10 text-sm outline-none focus:border-blue-500" />
                             {query && <button type="button" onClick={() => setFilter('q', '')} className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-neutral-500 hover:text-white" aria-label="Clear search"><X className="w-4 h-4" /></button>}
-                        </label>
+                        </div>
                         <label>
                             <span className="sr-only">Sort games</span>
                             <select value={sort} onChange={event => setFilter('sort', event.target.value)} className="w-full sm:w-auto bg-neutral-900 border border-neutral-800 rounded-xl py-2.5 px-3 text-sm outline-none focus:border-blue-500">
