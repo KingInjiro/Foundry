@@ -1,5 +1,6 @@
 import { StreamingManifestValidator } from './StreamingManifestValidator.js';
 import { QuotaConfig } from '../config/quotas.js';
+import { PackageReadError } from './GamePackageSource.js';
 import {
     SUPPORTED_CAPABILITIES as SUPPORTED_CAPABILITY_NAMES,
     runtimeSupportsCapability
@@ -12,7 +13,7 @@ export const SUPPORTED_STREAMING_MANIFEST_PATHS = Object.freeze([
     'foundry-streaming.json'
 ]);
 
-const MAX_MANIFEST_BYTES = 256 * 1024;
+export const MAX_MANIFEST_BYTES = 256 * 1024;
 const MANIFEST_STRING_LIMITS = Object.freeze({
     format: 32,
     gameId: 120,
@@ -333,7 +334,11 @@ export class GamePackageValidator {
             }
 
         } catch (e) {
-            addError('VALIDATION_EXCEPTION', `An unexpected error occurred during validation: ${e.message}`);
+            if (e instanceof PackageReadError) {
+                addError(e.code, e.message, e.path);
+            } else {
+                addError('VALIDATION_EXCEPTION', `An unexpected error occurred during validation: ${e.message}`);
+            }
         }
 
         return result;

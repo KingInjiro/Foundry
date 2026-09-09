@@ -1,9 +1,5 @@
 import { QuotaConfig } from '../config/quotas.js';
-import JSZip from 'jszip';
-import fs from 'fs';
-import path from 'path';
-import os from 'os';
-import { pipeline } from 'stream/promises';
+import { FileBackedZip } from '../validation/FileBackedZip.js';
 import mime from 'mime-types';
 import crypto from 'node:crypto';
 import { StreamableGlbValidator } from '../validation/StreamableGlbValidator.ts';
@@ -37,8 +33,7 @@ export class GamePackageExtractor {
     }
 
     async extractPackage(gameId, versionId, sourceObjectKey, entryFile, streamingManifestPath = null, options = {}) {
-        let tempFilePath = null;
-        let tempDirectoryPath = null;
+        let archive = null;
         const uploadedKeys = [];
         const baseKey = `games/${gameId}/versions/${versionId}/extracted`;
         
@@ -47,93 +42,15 @@ export class GamePackageExtractor {
             await this.storage.deletePrefix(baseKey);
         }
         try {
-            // 1. Download ZIP to temp file
-            const metadata = await this.storage.getObjectMetadata(sourceObjectKey);
-            if (metadata.contentLength > QuotaConfig.PLATFORM_MAX_PACKAGE_SIZE_BYTES) {
-                throw new Error(`Package is too large (${metadata.contentLength} bytes).`);
-            }
-
-            const stream = await this.storage.getDownloadStream(sourceObjectKey);
-            tempDirectoryPath = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'foundry-extract-'));
-            tempFilePath = path.join(tempDirectoryPath, 'package.zip');
-            const fileStream = fs.createWriteStream(tempFilePath);
-            await pipeline(stream, fileStream);
-
-            // 2. Load JSZip
-            const buffer = await fs.promises.readFile(tempFilePath);
-            const actualPackageSha256 = `sha256-${crypto.createHash('sha256').update(buffer).digest('hex')}`;
-            if (options.expectedPackageSha256 && actualPackageSha256 !== options.expectedPackageSha256) {
-                const error = new Error('Uploaded package changed after validation. Upload a new version and validate it again.');
-                error.code = 'PACKAGE_CHANGED_AFTER_VALIDATION';
-                throw error;
-            }
-            if (
-                Number.isSafeInteger(options.expectedPackageSizeBytes)
-                && options.expectedPackageSizeBytes >= 0
-                && metadata.contentLength !== options.expectedPackageSizeBytes
-            ) {
-                const error = new Error('Uploaded package size changed after validation. Upload a new version and validate it again.');
-                error.code = 'PACKAGE_CHANGED_AFTER_VALIDATION';
-                throw error;
-            }
-            const zip = await JSZip.loadAsync(buffer);
-            
-            const files = Object.keys(zip.files);
-            if (files.length > QuotaConfig.PLATFORM_MAX_EXTRACTED_FILES_PER_PACKAGE) {
-                throw new Error(`Package exceeds the maximum allowed number of files (${QuotaConfig.PLATFORM_MAX_EXTRACTED_FILES_PER_PACKAGE}).`);
-            }
-
+            archive = await FileBackedZip.download(this.storage, sourceObjectKey, {
+                ...options,
+                maxEntries: QuotaConfig.PLATFORM_MAX_EXTRACTED_FILES_PER_PACKAGE
+            });
+            const filesToExtract = [...archive.entries.keys()]
+                .filter(filename => !filename.endsWith('/'))
+                .map(filename => ({ filename, normalizedPath: filename }));
+            const validPaths = new Set(filesToExtract.map(file => file.filename));
             let totalExtractedSize = 0;
-            const quotaExtractedLimit = Number.isFinite(options.maxExtractedSizeBytes)
-                ? Math.max(0, Math.floor(options.maxExtractedSizeBytes))
-                : QuotaConfig.PLATFORM_MAX_TOTAL_EXTRACTED_SIZE_BYTES;
-            const effectiveExtractedLimit = Math.min(
-                QuotaConfig.PLATFORM_MAX_TOTAL_EXTRACTED_SIZE_BYTES,
-                quotaExtractedLimit
-            );
-            const validPaths = new Set();
-            const canonicalPaths = new Set();
-            const filesToExtract = [];
-            let declaredExtractedSize = 0;
-
-            // 3. Pre-flight validation of all files in ZIP
-            for (const filename of files) {
-                const zipEntry = zip.files[filename];
-                if (zipEntry.dir) continue; // skip directories
-
-                if (this.isUnsafePath(filename)) {
-                    throw new Error(`Unsafe path detected: ${filename}`);
-                }
-
-                // Normalize separators and reject case-only collisions for portable extraction.
-                const normalizedPath = filename;
-                const canonicalPath = normalizedPath.normalize('NFC').toLocaleLowerCase('en-US');
-                if (canonicalPaths.has(canonicalPath)) {
-                    throw new Error(`Duplicate or conflicting path detected: ${filename}`);
-                }
-
-                const declaredFileSize = Number(zipEntry?._data?.uncompressedSize);
-                if (Number.isSafeInteger(declaredFileSize) && declaredFileSize >= 0) {
-                    if (declaredFileSize > QuotaConfig.PLATFORM_MAX_FILE_SIZE_BYTES) {
-                        const error = new Error(`File ${filename} exceeds maximum allowed size (${QuotaConfig.PLATFORM_MAX_FILE_SIZE_BYTES} bytes).`);
-                        error.code = 'FILE_SIZE_EXCEEDED';
-                        throw error;
-                    }
-                    declaredExtractedSize += declaredFileSize;
-                    if (declaredExtractedSize > effectiveExtractedLimit) {
-                        const quotaLimited = effectiveExtractedLimit < QuotaConfig.PLATFORM_MAX_TOTAL_EXTRACTED_SIZE_BYTES;
-                        const error = new Error(quotaLimited
-                            ? 'Publishing this version would exceed the developer storage quota.'
-                            : `Total extracted size exceeds maximum allowed (${QuotaConfig.PLATFORM_MAX_TOTAL_EXTRACTED_SIZE_BYTES} bytes).`);
-                        error.code = quotaLimited ? 'STORAGE_QUOTA_EXCEEDED' : 'EXTRACTED_SIZE_EXCEEDED';
-                        throw error;
-                    }
-                }
-                validPaths.add(normalizedPath);
-                canonicalPaths.add(canonicalPath);
-
-                filesToExtract.push({ filename, normalizedPath, zipEntry });
-            }
 
             if (entryFile && !validPaths.has(entryFile)) {
                 throw new Error(`Entry file "${entryFile}" is missing from the extracted package.`);
@@ -149,7 +66,7 @@ export class GamePackageExtractor {
                     throw new Error(`Streaming manifest "${resolvedStreamingManifestPath}" is missing from the extracted package.`);
                 }
                 try {
-                    const smRaw = await zip.file(resolvedStreamingManifestPath).async('string');
+                    const smRaw = (await archive.readFile(resolvedStreamingManifestPath)).toString('utf8');
                     const sm = JSON.parse(smRaw);
                     if (sm.chunks && Array.isArray(sm.chunks)) {
                         for (const chunk of sm.chunks) {
@@ -165,11 +82,7 @@ export class GamePackageExtractor {
 
             // 4. Extract and Upload
             for (const file of filesToExtract) {
-                const uncompressedBuffer = await file.zipEntry.async('nodebuffer');
-                
-                if (uncompressedBuffer.length > QuotaConfig.PLATFORM_MAX_FILE_SIZE_BYTES) {
-                    throw new Error(`File ${file.filename} exceeds maximum allowed size (${QuotaConfig.PLATFORM_MAX_FILE_SIZE_BYTES} bytes).`);
-                }
+                const uncompressedBuffer = await archive.readFile(file.filename);
 
                 const streamableChunk = streamableChunks.get(file.normalizedPath);
                 if (streamableChunk) {
@@ -197,25 +110,17 @@ export class GamePackageExtractor {
                 }
 
                 totalExtractedSize += uncompressedBuffer.length;
-                if (totalExtractedSize > effectiveExtractedLimit) {
-                    const quotaLimited = effectiveExtractedLimit < QuotaConfig.PLATFORM_MAX_TOTAL_EXTRACTED_SIZE_BYTES;
-                    const error = new Error(quotaLimited
-                        ? 'Publishing this version would exceed the developer storage quota.'
-                        : `Total extracted size exceeds maximum allowed (${QuotaConfig.PLATFORM_MAX_TOTAL_EXTRACTED_SIZE_BYTES} bytes).`);
-                    error.code = quotaLimited ? 'STORAGE_QUOTA_EXCEEDED' : 'EXTRACTED_SIZE_EXCEEDED';
-                    throw error;
-                }
-
                 // Determine content type
                 let contentType = mime.lookup(file.normalizedPath) || 'application/octet-stream';
                 
                 const targetObjectKey = `games/${gameId}/versions/${versionId}/extracted/${file.normalizedPath}`;
                 
                 // Upload to storage
+                // Include an attempted write: a provider can persist an object before rejecting.
+                uploadedKeys.push(targetObjectKey);
                 await this.storage.uploadBuffer(targetObjectKey, uncompressedBuffer, contentType, {
                     cacheControl: 'public, max-age=31536000, immutable'
                 });
-                uploadedKeys.push(targetObjectKey);
             }
 
             return {
@@ -223,7 +128,7 @@ export class GamePackageExtractor {
                 extractedCount: filesToExtract.length,
                 totalSize: totalExtractedSize,
                 baseKey,
-                packageSizeBytes: metadata.contentLength,
+                packageSizeBytes: archive.packageSizeBytes,
                 extractedSizeBytes: totalExtractedSize,
                 runtimeUrl: `/api/cdn/${baseKey}`
             };
@@ -240,13 +145,7 @@ export class GamePackageExtractor {
             }
             throw error;
         } finally {
-            if (tempDirectoryPath) {
-                try {
-                    await fs.promises.rm(tempDirectoryPath, { recursive: true, force: true });
-                } catch (e) {
-                    console.error(`Failed to cleanup temporary extraction directory ${tempDirectoryPath}`, e);
-                }
-            }
+            await archive?.cleanup();
         }
     }
 

@@ -10,6 +10,9 @@ class MemoryStorage {
     constructor() {
         this.isConfigured = true;
         this.kind = 'memory';
+        const zip = new JSZip();
+        zip.file('index.html', 'hello');
+        this.packageBytes = zip.generateAsync({ type: 'nodebuffer' });
     }
 
     async createUploadSession(objectKey) {
@@ -17,13 +20,11 @@ class MemoryStorage {
     }
 
     async getDownloadStream() {
-        const zip = new JSZip();
-        zip.file('index.html', 'hello');
-        return Readable.from(await zip.generateAsync({ type: 'nodebuffer' }));
+        return Readable.from(await this.packageBytes);
     }
 
     async getObjectMetadata() {
-        return { contentLength: 1024, contentType: 'application/zip' };
+        return { contentLength: (await this.packageBytes).length, contentType: 'application/zip' };
     }
 
     async uploadBuffer() {}
