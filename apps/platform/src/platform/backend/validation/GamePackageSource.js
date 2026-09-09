@@ -1,3 +1,13 @@
+// Expected safety failures must retain their diagnostics across source implementations.
+export class PackageReadError extends Error {
+    constructor(code, message, path) {
+        super(message);
+        this.code = code;
+        this.path = path;
+        this.isPermanent = true;
+    }
+}
+
 export class GamePackageSource {
     /**
      * Reads the manifest.json file from the package root.

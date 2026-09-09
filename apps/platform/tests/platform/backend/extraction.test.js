@@ -8,7 +8,7 @@ describe('GamePackageExtractor', () => {
 
     beforeEach(() => {
         mockStorage = {
-            getObjectMetadata: vi.fn().mockResolvedValue({ contentLength: 1024 }),
+            getObjectMetadata: vi.fn(),
             getDownloadStream: vi.fn(),
             uploadBuffer: vi.fn().mockResolvedValue(),
             deleteObject: vi.fn().mockResolvedValue()
@@ -27,6 +27,7 @@ describe('GamePackageExtractor', () => {
     const setupMockZip = async (files) => {
         const buffer = await createZipBuffer(files);
         const { Readable } = await import('stream');
+        mockStorage.getObjectMetadata.mockResolvedValue({ contentLength: buffer.length });
         mockStorage.getDownloadStream.mockResolvedValue(Readable.from(buffer));
     };
 
