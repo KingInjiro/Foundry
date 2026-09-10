@@ -29,7 +29,9 @@ export function ProtectedRouteGate({ area = 'this page' }) {
                 <h1 className="mt-4 text-2xl font-bold">Sign in to continue</h1>
                 <p className="mt-2 text-sm text-neutral-400">Your destination is preserved. Sign in to open {area}.</p>
                 {error && <p className="mt-4 rounded-lg border border-red-500/25 bg-red-500/10 p-3 text-sm text-red-200" role="alert">{error}</p>}
-                <button type="button" onClick={() => void signIn()} disabled={busy} className="mt-5 w-full rounded-lg bg-blue-600 px-5 py-3 font-bold hover:bg-blue-500 disabled:opacity-50">
+                {/* Dialog cleanup may restore focus before the login continuation clears busy.
+                    Keep the trigger focusable; signIn's busy guard prevents repeat activation. */}
+                <button type="button" onClick={() => void signIn()} aria-disabled={busy} className="mt-5 w-full rounded-lg bg-blue-600 px-5 py-3 font-bold hover:bg-blue-500 aria-disabled:opacity-50">
                     {busy ? 'Signing in…' : 'Sign In'}
                 </button>
                 <nav aria-label="Public navigation" className="mt-4 flex flex-wrap justify-center gap-2 text-sm">

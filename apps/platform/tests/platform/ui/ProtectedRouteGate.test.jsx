@@ -1,9 +1,11 @@
 /** @vitest-environment jsdom */
-import React, { act } from 'react';
+import React, { act, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ProtectedRouteGate } from '../../../src/platform/auth/ProtectedRouteGate.jsx';
+import { LocalAuthDialog } from '../../../src/platform/auth/LocalAuthDialog.jsx';
 
 const auth = vi.hoisted(() => ({ login: vi.fn() }));
 vi.mock('../../../src/platform/auth/AuthContext.jsx', () => ({ useAuth: () => auth }));
@@ -58,10 +60,13 @@ describe('protected route public navigation', () => {
         auth.login.mockImplementation(() => new Promise(resolve => { dismiss = resolve; }));
         const signIn = container.querySelector('button');
         await act(async () => signIn.click());
-        expect(signIn.disabled).toBe(true);
+        expect(signIn.getAttribute('aria-disabled')).toBe('true');
+        await act(async () => signIn.click());
+        expect(auth.login).toHaveBeenCalledTimes(1);
         await act(async () => dismiss(null));
         expect(container.querySelector('output').textContent).toBe(destination);
         expect(signIn.disabled).toBe(false);
+        expect(signIn.getAttribute('aria-disabled')).toBe('false');
         expect(container.querySelector('[role="alert"]').textContent).toContain('browse without signing in');
         await act(async () => signIn.click());
         expect(auth.login).toHaveBeenCalledTimes(2);
@@ -77,5 +82,50 @@ describe('protected route public navigation', () => {
         expect(container.querySelector('output').textContent).toBe(destination);
         await act(async () => container.querySelector('a[href="/"]').click());
         expect(container.querySelector('h1').textContent).toBe('Foundry home');
+    });
+
+    it.each(['close', 'escape'])('returns focus to the trigger on %s before the login continuation finishes', async dismissal => {
+        function GateWithDialog() {
+            const [open, setOpen] = useState(false);
+            const resolveLogin = useRef(null);
+            auth.login.mockImplementation(async () => {
+                setOpen(true);
+                return new Promise(resolve => { resolveLogin.current = resolve; });
+            });
+            const close = () => {
+                resolveLogin.current(null);
+                setOpen(false);
+            };
+            return (
+                <MemoryRouter initialEntries={[destination]}>
+                    <Location />
+                    <ProtectedRouteGate area="Developer Dashboard" />
+                    <LocalAuthDialog open={open} onClose={close} onSubmit={vi.fn()} />
+                </MemoryRouter>
+            );
+        }
+        await act(async () => root.render(<GateWithDialog />));
+        const signIn = container.querySelector('button');
+        signIn.focus();
+        await act(async () => signIn.click());
+        expect(document.activeElement).toBe(container.querySelector('input[autocomplete="username"]'));
+        await act(async () => {
+            // Flush the dialog's close commit before the async login continuation,
+            // as can happen with a discrete browser click/keydown event.
+            flushSync(() => {
+                if (dismissal === 'close') container.querySelector('[aria-label="Close authentication dialog"]').click();
+                else window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+            });
+            expect(signIn.getAttribute('aria-disabled')).toBe('true');
+            expect(document.activeElement).toBe(signIn);
+        });
+        expect(container.querySelector('[role="dialog"]')).toBeNull();
+        expect(document.activeElement).toBe(signIn);
+        expect(signIn.textContent).toBe('Sign In');
+        expect(container.querySelector('output').textContent).toBe(destination);
+        await act(async () => signIn.click());
+        expect(auth.login).toHaveBeenCalledTimes(2);
+        expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+        await act(async () => container.querySelector('[aria-label="Close authentication dialog"]').click());
     });
 });
