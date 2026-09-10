@@ -5,7 +5,7 @@ test('Editor exit opens Developer Dashboard and retains the local code draft', a
   await installMockUser(context, 'editor-exit-owner');
   await page.goto('/editor');
   await expect(page.locator('.monaco-editor')).toBeVisible({ timeout: 20_000 });
-  const input = page.locator('.monaco-editor textarea');
+  const input = page.locator('.monaco-editor').getByRole('textbox');
   await input.focus();
   await page.keyboard.press('ControlOrMeta+Home');
   await page.keyboard.insertText('// navigation draft regression\n');
