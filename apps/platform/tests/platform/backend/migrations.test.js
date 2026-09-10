@@ -27,14 +27,16 @@ describe('versioned SQLite migrations', () => {
             { version: 5, name: 'editor_platform_projects' },
             { version: 6, name: 'moderation_foundation' },
             { version: 7, name: 'moderation_operations_audit' },
-            { version: 8, name: 'local_production_auth' }
+            { version: 8, name: 'local_production_auth' },
+            { version: 9, name: 'single_host_google_identities' }
         ]);
         expect(tables).toEqual(expect.arrayContaining([
             'editor_projects',
             'game_reports',
             'moderation_actions',
             'local_auth_credentials',
-            'local_auth_sessions'
+            'local_auth_sessions',
+            'external_auth_identities'
         ]));
         expect(columnNames(provider.db, 'games')).toContain('moderationState');
         expect(columnNames(provider.db, 'game_reports')).toEqual(expect.arrayContaining(['resolvedByUid', 'resolution', 'updatedAt']));
@@ -60,10 +62,10 @@ describe('versioned SQLite migrations', () => {
         const fresh = new LocalSqliteProvider(':memory:');
 
         expect((await upgraded.getGame('legacy-game')).title).toBe('Legacy');
-        for (const table of ['games', 'game_versions', 'upload_sessions', 'jobs', 'editor_projects', 'game_reports', 'moderation_actions', 'local_auth_credentials', 'local_auth_sessions']) {
+        for (const table of ['games', 'game_versions', 'upload_sessions', 'jobs', 'editor_projects', 'game_reports', 'moderation_actions', 'local_auth_credentials', 'local_auth_sessions', 'external_auth_identities']) {
             expect(columnNames(upgraded.db, table)).toEqual(columnNames(fresh.db, table));
         }
-        expect(upgraded.db.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get().count).toBe(5);
+        expect(upgraded.db.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get().count).toBe(6);
 
         await upgraded.close();
         await fresh.close();

@@ -226,5 +226,22 @@ export const PLATFORM_MIGRATIONS = Object.freeze([
                     ON local_auth_sessions (expiresAt, revokedAt);
             `);
         }
+    },
+    {
+        version: 9,
+        name: 'single_host_google_identities',
+        up(db) {
+            db.exec(`
+                CREATE TABLE IF NOT EXISTS external_auth_identities (
+                    provider TEXT NOT NULL CHECK (provider = 'google'),
+                    subject TEXT NOT NULL CHECK (length(subject) BETWEEN 1 AND 255),
+                    uid TEXT NOT NULL UNIQUE,
+                    disabledAt INTEGER,
+                    createdAt INTEGER NOT NULL,
+                    PRIMARY KEY (provider, subject),
+                    FOREIGN KEY (uid) REFERENCES users(uid) ON DELETE CASCADE
+                );
+            `);
+        }
     }
 ]);

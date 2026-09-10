@@ -6,7 +6,13 @@ This branch adds optional server-side Google OIDC authentication while preservin
 
 The draft PR CHECKPOINT is the authoritative recovery record. Resume by fetching this existing branch and reading that record; do not create another branch or PR.
 
-Initial checkpoint: branch created from the verified production main; implementation and validation have not started.
+CP1 complete: migration 9 adds `external_auth_identities` with unique `(provider, subject)` and a unique foreign-key UID. Local credentials are untouched. Google accounts have a random Foundry UID, no local username/password, and DEVELOPER role. The existing session reader accepts either a local credential or an external identity. Existing operator disable/enable works by Google user's Foundry UID; password reset cannot create a password for a Google-only user.
+
+Google OAuth foundation uses the already-locked `google-auth-library` 10.9.1 as a direct production dependency (no dependency versions upgraded). Real SDK signature validation plus strict issuer/audience/expiry/nonce/subject checks precede mapping. State is browser-bound, one-time, expires after 10 minutes and is capped at 1,000 pending attempts in the single Node process. It carries nonce and S256 PKCE; restarting drops unfinished flows safely. Only the temporary binding cookie is SameSite=Lax; Foundry sessions stay Strict. No refresh/access/ID tokens are persisted and SDK errors are sanitized.
+
+CP1 validation: 46/46 focused tests (Google 28 plus existing local auth/operator CLI/migrations/coordinated recovery), TypeScript and import boundaries PASS. Includes real RSA signature rejection and schema-8 upgrade/backup/restore identity persistence. Initial nested transaction failure was fixed by completing mapping first, then rechecking account status and issuing the session in one serialized transaction; the provider's nested-transaction guard remains intact.
+
+Next: wire the service into single-host `createApp` and add POST start/GET callback routes and HTTP security tests. The existing Caddy JSON access log records callback query parameters; before enabling OAuth, redact `code`/`state` at the proxy without suppressing request/status logging. This is a demonstrated auth-specific logging requirement, not a deployment architecture change. HTTP routes and frontend are not implemented yet.
 
 Planned checkpoints:
 1. Inspect the current authentication/database model; add verified provider identity persistence and tests. No email-based account linking; new external users receive DEVELOPER only.
