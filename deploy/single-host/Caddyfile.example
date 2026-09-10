@@ -1,3 +1,26 @@
+(foundry_auth_log_filter) {
+    format filter {
+        wrap json
+        fields {
+            request>uri query {
+                replace code REDACTED
+                replace state REDACTED
+                replace id_token REDACTED
+                replace access_token REDACTED
+                replace error_description REDACTED
+            }
+            request>headers>Referer delete
+        }
+    }
+}
+
+{
+    # Apply the same redaction to proxy error logs as to access logs.
+    log default {
+        import foundry_auth_log_filter
+    }
+}
+
 # Replace foundry.example.com with the hostname in PLATFORM_PUBLIC_BASE_URL.
 # Caddy obtains and renews TLS automatically once DNS points to this server.
 foundry.example.com {
@@ -8,6 +31,6 @@ foundry.example.com {
     # Do not add a second, conflicting security-header policy here.
     log {
         output file /var/log/caddy/foundry-access.log
-        format json
+        import foundry_auth_log_filter
     }
 }
