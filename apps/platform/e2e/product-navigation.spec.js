@@ -42,3 +42,19 @@ test('anonymous Editor exit goes to public Platform without requiring authentica
   await expect(page.getByRole('heading', { name: 'Foundry', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Sign In', exact: true })).toBeVisible();
 });
+
+for (const { protectedPath, label, destination } of [
+  { protectedPath: '/developer/project/navigation-private', label: 'Back to Home', destination: '/' },
+  { protectedPath: '/moderation', label: 'Browse Catalog', destination: '/player' }
+]) {
+  test(`protected ${protectedPath} offers ${label} without authentication`, async ({ page }) => {
+    await page.goto(protectedPath);
+    await expect(page.getByRole('heading', { name: 'Sign in to continue' })).toBeVisible();
+    const exit = page.getByRole('link', { name: label, exact: true });
+    await expect(exit).toHaveAttribute('href', destination);
+    await exit.click();
+    expect(new URL(page.url()).pathname).toBe(destination);
+    await expect(page.getByRole('heading', { name: 'Sign in to continue' })).toBeHidden();
+    await expect(page.getByRole('button', { name: 'Sign In', exact: true })).toBeVisible();
+  });
+}

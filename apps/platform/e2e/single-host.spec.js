@@ -70,6 +70,61 @@ async function mutate(context, endpoint, method, data, origin = baseURL) {
 }
 
 test.describe.serial('production-like single-host acceptance', () => {
+  test('protected local auth can be dismissed, exited, and resumed through register or sign-in', async ({ page }) => {
+    const runtimeErrors = watchRuntime(page);
+    for (const { destination, exit, method } of [
+      { destination: '/developer/project/navigation-private?tab=versions', exit: 'Back to Home', method: 'close' },
+      { destination: '/moderation', exit: 'Browse Catalog', method: 'escape' }
+    ]) {
+      await page.goto(destination);
+      const signIn = page.getByRole('button', { name: 'Sign In', exact: true });
+      await expect(page.getByRole('heading', { name: 'Sign in to continue' })).toBeVisible();
+      await signIn.click();
+      const dialog = page.getByRole('dialog', { name: 'Sign in to Foundry' });
+      await expect(dialog).toBeVisible();
+      if (method === 'close') {
+        await dialog.getByRole('button', { name: 'Close authentication dialog' }).click();
+      } else {
+        await dialog.getByRole('tab', { name: 'Register' }).click();
+        await page.keyboard.press('Escape');
+      }
+      await expect(page.getByRole('dialog')).toBeHidden();
+      expect(new URL(page.url()).pathname + new URL(page.url()).search).toBe(destination);
+      await expect(signIn).toBeEnabled();
+      await expect(signIn).toBeFocused();
+      await page.getByRole('link', { name: exit, exact: true }).click();
+      await expect(page).toHaveURL(exit === 'Back to Home' ? /\/$/ : /\/player$/);
+      await expect(page.getByRole('button', { name: 'Sign In', exact: true })).toBeVisible();
+    }
+
+    const protectedDestination = '/developer?from=navigation-test';
+    await page.goto(protectedDestination);
+    await page.getByRole('button', { name: 'Sign In', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByRole('tab', { name: 'Register' }).click();
+    await dialog.getByLabel('Username').fill('navigation-gate-user');
+    await dialog.getByLabel(/Display name/).fill('Navigation Gate User');
+    await dialog.getByLabel('Password').fill(password);
+    await dialog.getByRole('button', { name: 'Create Account' }).click();
+    await expect(dialog).toBeHidden();
+    await expect(page.getByText('Developer Dashboard', { exact: true })).toBeVisible();
+    expect(new URL(page.url()).pathname + new URL(page.url()).search).toBe(protectedDestination);
+
+    await page.goto('/');
+    await page.getByRole('button', { name: 'Sign Out' }).click();
+    await expect(page.getByRole('button', { name: 'Sign In', exact: true })).toBeVisible();
+    await page.goto(protectedDestination);
+    await page.getByRole('button', { name: 'Sign In', exact: true }).click();
+    await expect(dialog).toHaveAccessibleName('Sign in to Foundry');
+    await dialog.getByLabel('Username').fill('navigation-gate-user');
+    await dialog.getByLabel('Password').fill(password);
+    await dialog.getByRole('button', { name: 'Sign In', exact: true }).click();
+    await expect(dialog).toBeHidden();
+    await expect(page.getByText('Developer Dashboard', { exact: true })).toBeVisible();
+    expect(new URL(page.url()).pathname + new URL(page.url()).search).toBe(protectedDestination);
+    expect(runtimeErrors).toEqual([]);
+  });
+
   test('local account session uses secure cookies, CSRF, logout, and login', async ({ page, context }) => {
     const runtimeErrors = watchRuntime(page);
     const landing = await page.goto('/');
