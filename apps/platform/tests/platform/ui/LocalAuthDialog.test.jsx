@@ -79,4 +79,26 @@ describe('local authentication dialog usability', () => {
         expect(submit().disabled).toBe(false);
         expect(dialog()).not.toBeNull();
     });
+
+    it.each(['login', 'register'])('preserves the %s form submission contract', async mode => {
+        await render(true);
+        if (mode === 'register') {
+            await act(async () => container.querySelectorAll('[role="tab"]')[1].click());
+        }
+        const setValue = async (input, value) => act(async () => {
+            Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, value);
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        await setValue(username(), 'navigation-user');
+        await setValue(container.querySelector('input[type="password"]'), 'navigation test password');
+        if (mode === 'register') await setValue(container.querySelector('input[autocomplete="name"]'), 'Navigation User');
+        await act(async () => container.querySelector('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+        expect(onSubmit).toHaveBeenCalledExactlyOnceWith({
+            mode,
+            username: 'navigation-user',
+            password: 'navigation test password',
+            displayName: mode === 'register' ? 'Navigation User' : ''
+        });
+        expect(onClose).not.toHaveBeenCalled();
+    });
 });
