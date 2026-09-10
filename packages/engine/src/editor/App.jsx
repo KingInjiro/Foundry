@@ -710,6 +710,7 @@ if (iframeRef.current && iframeRef.current.contentWindow) {
 
     return (
         <div className="flex flex-col w-screen h-screen bg-neutral-950 text-white overflow-hidden font-sans">
+            {hostIntegration?.navigation}
             
             {/* Changelog Modal */}
             {showChangelog && <ChangelogModal onClose={() => setShowChangelog(false)} />}

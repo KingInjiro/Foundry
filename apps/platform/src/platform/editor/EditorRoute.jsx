@@ -2,7 +2,8 @@ import React, { useCallback, useMemo, useState } from 'react';
 import EditorApp from '@foundry/engine/editor';
 import { polyfill } from 'mobile-drag-drop';
 import 'mobile-drag-drop/default.css';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
+import { ArrowLeft } from 'lucide-react';
 import { apiClient } from '../api/apiClient.js';
 import { useAuth } from '../auth/AuthContext.jsx';
 import { EditorPlatformHandoffModal } from './EditorPlatformHandoffModal.jsx';
@@ -110,6 +111,14 @@ export default function EditorRoute() {
             <EditorApp
                 cloudProjectAdapter={cloudProjectAdapter}
                 hostIntegration={{
+                    navigation: (
+                        <nav aria-label="Platform navigation" className="shrink-0 border-b border-neutral-800 bg-neutral-950 px-3 py-1.5">
+                            <Link to={user ? '/developer' : '/'} className="inline-flex items-center gap-2 rounded px-2 py-1 text-sm text-neutral-300 hover:bg-neutral-800 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-400">
+                                <ArrowLeft size={16} aria-hidden="true" />
+                                {user ? 'Back to Developer Dashboard' : 'Back to Platform'}
+                            </Link>
+                        </nav>
+                    ),
                     actionLabel: 'Send to Platform',
                     onSend: openPlatformHandoff,
                     statusLabel: linkedProject
