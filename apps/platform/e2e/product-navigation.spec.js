@@ -39,7 +39,7 @@ test('anonymous Editor exit goes to public Platform without requiring authentica
   await expect(exit).toHaveAttribute('href', '/');
   await exit.click();
   await expect(page).toHaveURL(/\/$/);
-  await expect(page.getByRole('heading', { name: 'Foundry', exact: true })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Foundry home', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Sign In', exact: true })).toBeVisible();
 });
 
