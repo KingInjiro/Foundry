@@ -14,7 +14,7 @@ describe('local authentication dialog usability', () => {
     const key = (target, value, options = {}) => target.dispatchEvent(new KeyboardEvent('keydown', {
         key: value, bubbles: true, cancelable: true, ...options
     }));
-    const render = async open => act(async () => root.render(<LocalAuthDialog open={open} onClose={onClose} onSubmit={onSubmit} />));
+    const render = async (open, props = {}) => act(async () => root.render(<LocalAuthDialog open={open} onClose={onClose} onSubmit={onSubmit} {...props} />));
 
     beforeEach(() => {
         container = document.createElement('div');
@@ -100,5 +100,44 @@ describe('local authentication dialog usability', () => {
             displayName: mode === 'register' ? 'Navigation User' : ''
         });
         expect(onClose).not.toHaveBeenCalled();
+    });
+
+    it('shows optional Google sign-in in both modes while keeping local fields and keyboard dismissal', async () => {
+        await render(true);
+        expect(container.textContent).not.toContain('Continue with Google');
+        const onGoogle = vi.fn();
+        await render(true, { onGoogle });
+        const google = [...container.querySelectorAll('button')].find(button => button.textContent.includes('Continue with Google'));
+        expect(google.type).toBe('button');
+        expect(google.querySelector('img').alt).toBe('');
+        await act(async () => container.querySelectorAll('[role="tab"]')[1].click());
+        expect(google.isConnected).toBe(true);
+        expect(username()).not.toBeNull();
+        expect(container.querySelector('input[type="password"]')).not.toBeNull();
+        google.focus();
+        await act(async () => key(google, 'Escape'));
+        expect(onClose).toHaveBeenCalledOnce();
+        await render(false, { onGoogle });
+        expect(document.activeElement).toBe(opener);
+    });
+
+    it('recovers from a failed Google start and allows the unchanged local submission', async () => {
+        let reject;
+        const onGoogle = vi.fn(() => new Promise((_, fail) => { reject = fail; }));
+        await render(true, { onGoogle });
+        const google = [...container.querySelectorAll('button')].find(button => button.textContent.includes('Continue with Google'));
+        await act(async () => google.click());
+        expect(onGoogle).toHaveBeenCalledOnce();
+        expect(onSubmit).not.toHaveBeenCalled();
+        expect(google.disabled).toBe(true);
+        expect(submit().disabled).toBe(true);
+        await act(async () => key(window, 'Escape'));
+        expect(onClose).not.toHaveBeenCalled();
+        await act(async () => reject(new Error('Google start unavailable')));
+        expect(container.querySelector('[role="alert"]').textContent).toBe('Google start unavailable');
+        expect(google.disabled).toBe(false);
+        expect(submit().disabled).toBe(false);
+        await act(async () => container.querySelector('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+        expect(onSubmit).toHaveBeenCalledOnce();
     });
 });

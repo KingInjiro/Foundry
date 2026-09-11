@@ -13,6 +13,8 @@ import { GameVersionPublishService } from '../extraction/GameVersionPublishServi
 import { LocalJobQueue } from '../jobs/LocalJobQueue.js';
 import { requireAuth, optionalAuth } from '../auth/authMiddleware.js';
 import { LocalAuthError, LocalAuthService, normalizeLocalUsername } from '../auth/LocalAuthService.js';
+import { GoogleOAuthService } from '../auth/GoogleOAuthService.js';
+import { registerGoogleAuthRoutes } from '../auth/googleAuthRoutes.js';
 import { LocalSqliteProvider } from '../database/LocalSqliteProvider.js';
 import { R2StorageProvider } from '../storage/R2StorageProvider.js';
 import { ReleaseLifecycleService } from '../lifecycle/ReleaseLifecycleService.js';
@@ -238,6 +240,12 @@ export function createApp(injectedDb, injectedStorage, jobQueue, options = {}) {
     app.locals.logger = logger;
     app.locals.deploymentMode = deploymentMode;
     app.locals.localAuthService = localAuthService;
+    const googleAuthService = localAuthService ? new GoogleOAuthService(localAuthService, {
+        clientId: options.googleAuthOptions?.clientId ?? process.env.GOOGLE_OAUTH_CLIENT_ID,
+        clientSecret: options.googleAuthOptions?.clientSecret ?? process.env.GOOGLE_OAUTH_CLIENT_SECRET,
+        publicOrigin: localAuthService.publicOrigin
+    }, { client: options.googleAuthOptions?.client, now: options.googleAuthOptions?.now }) : null;
+    app.locals.googleAuthService = googleAuthService;
     app.locals.startedAt = Date.now();
     app.disable('x-powered-by');
 
@@ -510,7 +518,7 @@ export function createApp(injectedDb, injectedStorage, jobQueue, options = {}) {
     
     if (localAuthService) {
         const safeMethods = new Set(['GET', 'HEAD', 'OPTIONS']);
-        const csrfExemptPaths = new Set(['/api/auth/local/register', '/api/auth/local/login', storage.uploadRoute]);
+        const csrfExemptPaths = new Set(['/api/auth/local/register', '/api/auth/local/login', '/api/auth/google/start', storage.uploadRoute]);
         app.use('/api', (req, res, next) => {
             if (safeMethods.has(req.method)) return next();
             if (!localAuthService.verifyRequestOrigin(req)) {
@@ -569,6 +577,12 @@ export function createApp(injectedDb, injectedStorage, jobQueue, options = {}) {
                 }
             );
         }
+
+        registerGoogleAuthRoutes(app, googleAuthService, {
+            startLimit: createRateLimitMiddleware(rateLimiter, 'auth_google_start_ip', { identity: authIpIdentity }),
+            callbackLimit: createRateLimitMiddleware(rateLimiter, 'auth_google_callback_ip', { identity: authIpIdentity }),
+            logger
+        });
 
         const sendLocalAuthError = (req, res, error, event) => {
             const known = error instanceof LocalAuthError;

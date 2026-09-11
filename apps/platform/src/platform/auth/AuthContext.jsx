@@ -101,7 +101,26 @@ export function AuthProvider({ children }) {
     const [user, setUser] = useState(null);
     const [loading, setLoading] = useState(true);
     const [localDialogOpen, setLocalDialogOpen] = useState(false);
+    const [googleEnabled, setGoogleEnabled] = useState(false);
+    const [googleNotice, setGoogleNotice] = useState(() => {
+        if (!localProductionAuth) return '';
+        const result = new URLSearchParams(window.location.search).get('googleAuth');
+        return new Map([
+            ['cancelled', 'Google sign-in was cancelled. You can try again, use your username and password, or browse without signing in.'],
+            ['failed', 'Google sign-in could not be completed. Try again or use your username and password.'],
+            ['disabled', 'This Google-linked Foundry account is disabled. Contact the server operator.']
+        ]).get(result) || '';
+    });
     const loginResolverRef = useRef(null);
+
+    const clearGoogleNotice = () => {
+        setGoogleNotice('');
+        const url = new URL(window.location.href);
+        if (url.searchParams.has('googleAuth')) {
+            url.searchParams.delete('googleAuth');
+            window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash);
+        }
+    };
 
     const resolveLocalLogin = useCallback(result => {
         loginResolverRef.current?.(result);
@@ -112,6 +131,13 @@ export function AuthProvider({ children }) {
     useEffect(() => {
         if (localProductionAuth) {
             let cancelled = false;
+            void localAuthRequest('/api/auth/google/config').then(configuration => {
+                if (!cancelled) setGoogleEnabled(configuration?.enabled === true);
+            }).catch(() => {
+                // Optional Google availability cannot block local login/session
+                // initialization. The server reports configured availability.
+                if (!cancelled) setGoogleEnabled(false);
+            });
             void localAuthRequest('/api/auth/local/session')
                 .then(session => {
                     if (cancelled) return;
@@ -203,7 +229,22 @@ export function AuthProvider({ children }) {
         });
         localCsrfToken = session.csrfToken;
         setUser(session.user);
+        clearGoogleNotice();
         resolveLocalLogin(session.user);
+    };
+
+    const beginGoogleLogin = async () => {
+        if (!localProductionAuth || !googleEnabled) throw new Error('Google sign-in is unavailable. Use your username and password.');
+        const { url } = await localAuthRequest('/api/auth/google/start', {
+            method: 'POST',
+            body: JSON.stringify({ returnTo: window.location.pathname + window.location.search + window.location.hash })
+        });
+        const target = new URL(url);
+        if (target.origin !== 'https://accounts.google.com' || target.pathname !== '/o/oauth2/v2/auth') {
+            throw new Error('Google sign-in could not be started. Use your username and password.');
+        }
+        clearGoogleNotice();
+        window.location.assign(target.href);
     };
 
     const logout = async () => {
@@ -244,10 +285,17 @@ export function AuthProvider({ children }) {
     return (
         <AuthContext.Provider value={{ user, loading, login, logout, authProvider: getAuthProvider() }}>
             {children}
+            {googleNotice && (
+                <div role="status" aria-label="Sign-in feedback" className="fixed bottom-4 left-4 right-4 z-[90] mx-auto max-w-lg rounded-xl border border-neutral-600 bg-neutral-900 p-4 text-sm text-white shadow-lg">
+                    <p>{googleNotice}</p>
+                    <button type="button" onClick={clearGoogleNotice} className="mt-2 rounded px-2 py-1 font-semibold underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-400">Dismiss sign-in message</button>
+                </div>
+            )}
             <LocalAuthDialog
                 open={localProductionAuth && localDialogOpen}
                 onClose={() => resolveLocalLogin(null)}
                 onSubmit={submitLocalLogin}
+                onGoogle={localProductionAuth && googleEnabled ? beginGoogleLogin : undefined}
             />
         </AuthContext.Provider>
     );

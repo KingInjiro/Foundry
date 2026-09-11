@@ -50,7 +50,7 @@ describe('SQLite backup and restore', () => {
         expect(backup.quickCheck).toBe('ok');
         expect(backup.foreignKeyViolations).toBe(0);
         expect(backup.rowCounts.games).toBe(1);
-        expect(backup.schemaMigrations.map(item => item.version)).toEqual([4, 5, 6, 7, 8]);
+        expect(backup.schemaMigrations.map(item => item.version)).toEqual([4, 5, 6, 7, 8, 9]);
 
         const result = restoreSqliteBackup({ backupPath, targetPath: restoredPath });
         expect(result.backup.sha256).toBe(backup.sha256);

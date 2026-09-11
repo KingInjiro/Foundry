@@ -7,6 +7,9 @@ export class DatabaseProvider {
     async createLocalAccount(account) { throw new Error("Not implemented"); }
     async updateLocalPassword(uid, passwordHash, now) { throw new Error("Not implemented"); }
     async setLocalUserDisabled(uid, disabled, now) { throw new Error("Not implemented"); }
+    async findOrCreateGoogleUser(identity) { throw new Error("Not implemented"); }
+    async getExternalAccountByUid(uid) { throw new Error("Not implemented"); }
+    async setExternalUserDisabled(uid, disabled, now) { throw new Error("Not implemented"); }
     async createLocalSession(session) { throw new Error("Not implemented"); }
     async getLocalSession(tokenHash) { throw new Error("Not implemented"); }
     async touchLocalSession(tokenHash, lastSeenAt) { throw new Error("Not implemented"); }

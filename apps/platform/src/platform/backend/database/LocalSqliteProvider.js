@@ -1,5 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { DatabaseProvider } from './DatabaseProvider.js';
@@ -374,6 +375,49 @@ export class LocalSqliteProvider extends DatabaseProvider {
         });
     }
 
+    async findOrCreateGoogleUser({ subject, email = '', displayName = '', now = Date.now() }) {
+        if (typeof subject !== 'string' || !/^[\x21-\x7e]{1,255}$/.test(subject)) {
+            throw new TypeError('Invalid Google subject.');
+        }
+        return this.runSerializedTransaction(async () => {
+            const existing = this.db.prepare(`
+                SELECT u.*, i.disabledAt FROM external_auth_identities i
+                JOIN users u ON u.uid = i.uid WHERE i.provider = 'google' AND i.subject = ?
+            `).get(subject);
+            if (existing) return existing;
+
+            // Never look up by email, username or client-supplied UID. No local
+            // credential is created, so no existing username can be claimed.
+            const uid = randomUUID();
+            this.db.prepare(`
+                INSERT INTO users (uid, email, displayName, avatarUrl, role, createdAt, updatedAt)
+                VALUES (?, ?, ?, '', 'DEVELOPER', ?, ?)
+            `).run(uid, email, displayName || 'Google user', now, now);
+            this.db.prepare(`
+                INSERT INTO external_auth_identities (provider, subject, uid, createdAt)
+                VALUES ('google', ?, ?, ?)
+            `).run(subject, uid, now);
+            return this.getExternalAccountByUid(uid);
+        });
+    }
+
+    async getExternalAccountByUid(uid) {
+        return this.db.prepare(`
+            SELECT u.*, i.disabledAt FROM external_auth_identities i
+            JOIN users u ON u.uid = i.uid WHERE i.uid = ?
+        `).get(uid);
+    }
+
+    async setExternalUserDisabled(uid, disabled, now = Date.now()) {
+        return this.runSerializedTransaction(async () => {
+            const result = this.db.prepare('UPDATE external_auth_identities SET disabledAt = ? WHERE uid = ?')
+                .run(disabled ? now : null, uid);
+            if (!result.changes) return null;
+            if (disabled) await this.revokeAllLocalSessions(uid, now);
+            return this.getExternalAccountByUid(uid);
+        });
+    }
+
     async createLocalSession(session) {
         this.db.prepare(`
             INSERT INTO local_auth_sessions (tokenHash, uid, createdAt, expiresAt, lastSeenAt, revokedAt)
@@ -385,12 +429,13 @@ export class LocalSqliteProvider extends DatabaseProvider {
     async getLocalSession(tokenHash) {
         return this.db.prepare(`
             SELECT s.tokenHash, s.uid, s.createdAt, s.expiresAt, s.lastSeenAt, s.revokedAt,
-                   c.username, c.usernameNormalized, c.disabledAt, c.passwordChangedAt,
+                   c.username, c.usernameNormalized, COALESCE(c.disabledAt, i.disabledAt) AS disabledAt, c.passwordChangedAt,
                    u.email, u.displayName, u.avatarUrl, u.role
             FROM local_auth_sessions s
-            JOIN local_auth_credentials c ON c.uid = s.uid
             JOIN users u ON u.uid = s.uid
-            WHERE s.tokenHash = ?
+            LEFT JOIN local_auth_credentials c ON c.uid = s.uid
+            LEFT JOIN external_auth_identities i ON i.uid = s.uid
+            WHERE s.tokenHash = ? AND (c.uid IS NOT NULL OR i.uid IS NOT NULL)
         `).get(tokenHash);
     }
 

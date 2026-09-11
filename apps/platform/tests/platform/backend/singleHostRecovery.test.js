@@ -69,7 +69,7 @@ describe('coordinated single-host backup and restore', () => {
         });
         expect(backup.status).toBe('PASS');
         expect(backup.database.quickCheck).toBe('ok');
-        expect(backup.manifest.database.schemaMigrations.at(-1).version).toBe(8);
+        expect(backup.manifest.database.schemaMigrations.at(-1).version).toBe(9);
         expect(backup.objects).toEqual({ count: 1, totalBytes: 14 });
         expect(backup.manifest.objects.files[0]).toMatchObject({
             key: 'games/backup-game/index.html',

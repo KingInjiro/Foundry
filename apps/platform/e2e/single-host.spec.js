@@ -69,6 +69,51 @@ async function mutate(context, endpoint, method, data, origin = baseURL) {
   });
 }
 
+async function mockGooglePage(page, { cancel = false, claims = {} } = {}) {
+  await page.route('https://accounts.google.com/o/oauth2/v2/auth?**', async route => {
+    const authorization = new URL(route.request().url());
+    expect(authorization.searchParams.get('response_type')).toBe('code');
+    expect(authorization.searchParams.get('code_challenge_method')).toBe('S256');
+    expect(authorization.searchParams.get('redirect_uri')).toBe(`${baseURL}/api/auth/google/callback`);
+    const callback = new URL(authorization.searchParams.get('redirect_uri'));
+    callback.searchParams.set('state', authorization.searchParams.get('state'));
+    if (cancel) {
+      callback.searchParams.set('error', 'access_denied');
+    } else {
+      const issued = await page.context().request.post('http://127.0.0.1:3445/issue', {
+        data: { nonce: authorization.searchParams.get('nonce'), challenge: authorization.searchParams.get('code_challenge'), claims }
+      });
+      expect(issued.status()).toBe(200);
+      callback.searchParams.set('code', (await issued.json()).code);
+    }
+    // A real top-level cross-site GET carries the Lax binding cookie. The
+    // backend, callback, session cookie and RSA verifier are not mocked.
+    await route.fulfill({ contentType: 'text/html', body: `<!doctype html><html><head><title>Test Google consent</title><link rel="icon" href="data:,"></head><body><a href="${callback.href.replaceAll('&', '&amp;')}">${cancel ? 'Cancel Google sign-in' : 'Complete Google sign-in'}</a></body></html>` });
+  });
+}
+
+async function startGoogle(page, destination) {
+    await page.goto(destination);
+    await page.getByRole('button', { name: 'Sign In', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toHaveAccessibleName('Sign in to Foundry');
+  await expect(dialog.getByLabel('Username')).toBeVisible();
+  await expect(dialog.getByLabel('Password')).toBeVisible();
+  await dialog.getByRole('tab', { name: 'Register' }).click();
+  await expect(dialog.getByRole('button', { name: 'Continue with Google' })).toBeVisible();
+  await expect(dialog.getByRole('button', { name: 'Create Account' })).toBeVisible();
+  await dialog.getByRole('tab', { name: 'Sign In', exact: true }).click();
+  const started = page.waitForRequest(request => new URL(request.url()).pathname === '/api/auth/google/start');
+  await dialog.getByRole('button', { name: 'Continue with Google' }).click();
+  const request = await started;
+  expect(request.method()).toBe('POST');
+  expect(request.postDataJSON()).toEqual({ returnTo: destination });
+  expect(request.headers().origin).toBe(baseURL);
+  await expect(page).toHaveURL(/^https:\/\/accounts\.google\.com\/o\/oauth2\/v2\/auth\?/);
+  const binding = (await page.context().cookies(baseURL)).find(cookie => cookie.name === '__Host-foundry_google');
+  expect(binding).toMatchObject({ httpOnly: true, secure: true, sameSite: 'Lax', path: '/' });
+}
+
 test.describe.serial('production-like single-host acceptance', () => {
   test('protected local auth can be dismissed, exited, and resumed through register or sign-in', async ({ page }) => {
     const runtimeErrors = watchRuntime(page);
@@ -102,6 +147,7 @@ test.describe.serial('production-like single-host acceptance', () => {
     await page.getByRole('button', { name: 'Sign In', exact: true }).click();
     const dialog = page.getByRole('dialog');
     await dialog.getByRole('tab', { name: 'Register' }).click();
+    await expect(dialog).toHaveAccessibleName('Create a Foundry account');
     await dialog.getByLabel('Username').fill('navigation-gate-user');
     await dialog.getByLabel(/Display name/).fill('Navigation Gate User');
     await dialog.getByLabel('Password').fill(password);
@@ -171,6 +217,93 @@ test.describe.serial('production-like single-host acceptance', () => {
     await dialog.getByRole('button', { name: 'Sign In', exact: true }).click();
     await expect(dialog).toBeHidden();
     await expect(page.getByRole('button', { name: 'Sign Out' })).toBeVisible();
+    expect(runtimeErrors).toEqual([]);
+  });
+
+  test('Google resumes the protected destination with a real Foundry session, CSRF and logout', async ({ page, context }) => {
+    const runtimeErrors = watchRuntime(page);
+    const destination = '/developer?from=google-test';
+    await mockGooglePage(page, { claims: { sub: 'browser-google-developer', email: 'local-session-user@example.test', email_verified: true, name: 'Google Developer', role: 'ADMIN' } });
+    await startGoogle(page, destination);
+    await page.getByRole('link', { name: 'Complete Google sign-in' }).click();
+    await expect(page.getByText('Developer Dashboard', { exact: true })).toBeVisible();
+    expect(new URL(page.url()).pathname + new URL(page.url()).search).toBe(destination);
+    const signedIn = await session(context);
+    expect(signedIn.user).toMatchObject({ role: 'DEVELOPER', displayName: 'Google Developer' });
+    expect(signedIn.user.uid).not.toBe('browser-google-developer');
+    expect(signedIn.csrfToken).toBeTruthy();
+    const cookies = await context.cookies();
+    expect(cookies.find(cookie => cookie.name === '__Host-foundry_session')).toMatchObject({ httpOnly: true, secure: true, sameSite: 'Strict', path: '/' });
+    expect(cookies.some(cookie => cookie.name === '__Host-foundry_google')).toBe(false);
+    const denied = await context.request.post('/api/auth/local/logout', { headers: { Origin: baseURL, 'X-CSRF-Token': 'invalid' } });
+    expect(denied.status()).toBe(403);
+    expect((await denied.json()).error.code).toBe('CSRF_TOKEN_INVALID');
+    expect((await session(context)).user.uid).toBe(signedIn.user.uid);
+    await page.goto('/moderation');
+    await expect(page.getByRole('alert')).toContainText('Moderator access required');
+    await page.goto('/');
+    await page.getByRole('button', { name: 'Sign Out' }).click();
+    await expect(page.getByRole('button', { name: 'Sign In', exact: true })).toBeVisible();
+    expect((await session(context)).user).toBeNull();
+    await startGoogle(page, destination);
+    await page.getByRole('link', { name: 'Complete Google sign-in' }).click();
+    await expect(page.getByText('Developer Dashboard', { exact: true })).toBeVisible();
+    expect((await session(context)).user.uid).toBe(signedIn.user.uid);
+    expect(runtimeErrors).toEqual([]);
+  });
+
+  for (const outcome of ['cancelled', 'failed']) {
+    test(`Google ${outcome} keeps local auth, focus and public exits usable`, async ({ page, context }) => {
+      const runtimeErrors = watchRuntime(page);
+      const destination = '/developer?from=google-error-test';
+      // Wrong nonce is signed correctly: the actual OIDC verifier must reject it.
+      await mockGooglePage(page, outcome === 'cancelled' ? { cancel: true } : { claims: { nonce: 'wrong-nonce' } });
+      await startGoogle(page, destination);
+      await page.getByRole('link', { name: outcome === 'cancelled' ? 'Cancel Google sign-in' : 'Complete Google sign-in' }).click();
+      await expect(page.getByRole('status', { name: 'Sign-in feedback' })).toContainText(outcome === 'cancelled' ? 'Google sign-in was cancelled' : 'Google sign-in could not be completed');
+      expect((await session(context)).user).toBeNull();
+      const signIn = page.getByRole('button', { name: 'Sign In', exact: true });
+      for (const dismiss of ['close', 'escape']) {
+        await signIn.click();
+        const dialog = page.getByRole('dialog');
+        await expect(dialog.getByRole('button', { name: 'Continue with Google' })).toBeEnabled();
+        await dialog.getByRole('tab', { name: 'Register' }).click();
+        await expect(dialog.getByRole('button', { name: 'Create Account' })).toBeEnabled();
+        if (dismiss === 'close') await dialog.getByRole('button', { name: 'Close authentication dialog' }).click();
+        else await page.keyboard.press('Escape');
+        await expect(dialog).toBeHidden();
+        await expect(signIn).toBeEnabled();
+        await expect(signIn).toBeFocused();
+      }
+      await expect(page.getByRole('link', { name: 'Back to Home', exact: true })).toHaveAttribute('href', '/');
+      await page.getByRole('link', { name: 'Browse Catalog', exact: true }).click();
+      await expect(page).toHaveURL(/\/player$/);
+      await page.getByRole('button', { name: 'Dismiss sign-in message' }).click();
+      await expect(page.getByRole('status', { name: 'Sign-in feedback' })).toBeHidden();
+      const dialog = await login(page, 'local-session-user');
+      await expect(dialog).toBeHidden();
+      expect((await session(context)).user.displayName).toBe('Local Session User');
+      expect(runtimeErrors).toEqual([]);
+    });
+  }
+
+  test('disabled Google availability leaves both local authentication modes usable', async ({ page }) => {
+    const runtimeErrors = watchRuntime(page);
+    await page.route('**/api/auth/google/config', route => route.fulfill({ json: { success: true, data: { enabled: false } } }));
+    await page.goto('/developer?googleAuth=__proto__');
+    await expect(page.getByRole('status', { name: 'Sign-in feedback' })).toBeHidden();
+    const signIn = page.getByRole('button', { name: 'Sign In', exact: true });
+    await signIn.click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog.getByRole('button', { name: 'Continue with Google' })).toHaveCount(0);
+    await dialog.getByRole('tab', { name: 'Register' }).click();
+    await expect(dialog.getByRole('button', { name: 'Continue with Google' })).toHaveCount(0);
+    await expect(dialog.getByRole('button', { name: 'Create Account' })).toBeEnabled();
+    await dialog.getByRole('tab', { name: 'Sign In', exact: true }).click();
+    await dialog.getByLabel('Username').fill('local-session-user');
+    await dialog.getByLabel('Password').fill(password);
+    await dialog.getByRole('button', { name: 'Sign In', exact: true }).click();
+    await expect(page.getByText('Developer Dashboard', { exact: true })).toBeVisible();
     expect(runtimeErrors).toEqual([]);
   });
 

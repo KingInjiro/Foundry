@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { LockKeyhole, X } from 'lucide-react';
+import googleLogo from './assets/google-g.png';
 
-export function LocalAuthDialog({ open, onClose, onSubmit }) {
+export function LocalAuthDialog({ open, onClose, onSubmit, onGoogle }) {
     const [mode, setMode] = useState('login');
     const [username, setUsername] = useState('');
     const [displayName, setDisplayName] = useState('');
@@ -82,6 +83,19 @@ export function LocalAuthDialog({ open, onClose, onSubmit }) {
         setError('');
     };
 
+    const continueWithGoogle = async () => {
+        if (busy || !onGoogle) return;
+        setBusy(true);
+        setError('');
+        try {
+            await onGoogle();
+        } catch (googleError) {
+            setError(googleError?.message || 'Google sign-in could not be started. Use your username and password.');
+        } finally {
+            setBusy(false);
+        }
+    };
+
     const onModeKeyDown = event => {
         if (busy || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
         event.preventDefault();
@@ -155,6 +169,16 @@ export function LocalAuthDialog({ open, onClose, onSubmit }) {
                         Register
                     </button>
                 </div>
+
+                {onGoogle && (
+                    <div className="mt-5">
+                        <button type="button" onClick={continueWithGoogle} disabled={busy} className="flex h-10 w-full items-center justify-center gap-2.5 rounded border border-[#747775] bg-white px-3 text-sm font-medium text-[#1f1f1f] hover:bg-neutral-100 disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-400">
+                            <img src={googleLogo} alt="" width="20" height="20" />
+                            Continue with Google
+                        </button>
+                        <div className="mt-4 flex items-center gap-3 text-xs text-neutral-400" aria-hidden="true"><span className="h-px flex-1 bg-neutral-700" />or<span className="h-px flex-1 bg-neutral-700" /></div>
+                    </div>
+                )}
 
                 <form id="local-auth-panel" role="tabpanel" aria-labelledby={`local-auth-${mode}-tab`} aria-busy={busy} className="mt-5 space-y-4" onSubmit={submit}>
                     <label className="block text-sm font-medium text-neutral-200">

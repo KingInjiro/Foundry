@@ -373,13 +373,14 @@ export class LocalAuthService {
         const value = typeof identifier === 'string' ? identifier.trim() : '';
         if (!value) return null;
         return await this.database.getLocalCredentialByUid(value)
-            || await this.database.getLocalCredentialByUsername(normalizeLocalUsername(value));
+            || await this.database.getLocalCredentialByUsername(normalizeLocalUsername(value))
+            || await this.database.getExternalAccountByUid(value);
     }
 
     async resetPassword(identifier, password) {
         validateLocalPassword(password);
         const account = await this.findAccount(identifier);
-        if (!account) throw new LocalAuthError('ACCOUNT_NOT_FOUND', 'Local account not found.', 404);
+        if (!account?.passwordHash) throw new LocalAuthError('ACCOUNT_NOT_FOUND', 'Local password account not found.', 404);
         const passwordHash = await hashLocalPassword(password);
         const updated = await this.database.updateLocalPassword(account.uid, passwordHash, this.now());
         return safeUser(updated);
@@ -388,7 +389,9 @@ export class LocalAuthService {
     async setDisabled(identifier, disabled) {
         const account = await this.findAccount(identifier);
         if (!account) throw new LocalAuthError('ACCOUNT_NOT_FOUND', 'Local account not found.', 404);
-        const updated = await this.database.setLocalUserDisabled(account.uid, Boolean(disabled), this.now());
+        const updated = account.passwordHash
+            ? await this.database.setLocalUserDisabled(account.uid, Boolean(disabled), this.now())
+            : await this.database.setExternalUserDisabled(account.uid, Boolean(disabled), this.now());
         return { ...safeUser(updated), disabled: Boolean(updated.disabledAt) };
     }
 }

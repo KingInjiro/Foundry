@@ -51,6 +51,7 @@
     "file-saver": "^2.0.5",
     "firebase": "^12.16.0",
     "firebase-admin": "^14.2.0",
+    "google-auth-library": "10.9.1",
     "jszip": "^3.10.1",
     "lucide-react": "^0.546.0",
     "mime-types": "^3.0.2",

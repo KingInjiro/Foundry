@@ -33,12 +33,12 @@ describe('single-host application rollback guard', () => {
         const database = new LocalSqliteProvider(databasePath);
         await database.close();
 
-        expect(checkReleaseCompatibility(releaseProfile(root, 8), databasePath)).toMatchObject({
+        expect(checkReleaseCompatibility(releaseProfile(root, 9), databasePath)).toMatchObject({
             status: 'PASS',
-            currentDatabaseMigration: 8,
-            releaseMaximumDatabaseMigration: 8
+            currentDatabaseMigration: 9,
+            releaseMaximumDatabaseMigration: 9
         });
-        expect(() => checkReleaseCompatibility(releaseProfile(root, 7), databasePath))
+        expect(() => checkReleaseCompatibility(releaseProfile(root, 8), databasePath))
             .toThrow('Rollback is unsafe');
     });
 });

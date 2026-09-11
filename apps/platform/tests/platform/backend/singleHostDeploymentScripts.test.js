@@ -521,6 +521,15 @@ describe('single-host atomic deployment scripts', () => {
         expect(caddyLogging).toContain('LogsDirectory=caddy');
         expect(caddyLogging).toContain('LogsDirectoryMode=0750');
         expect(caddyLogging).not.toMatch(/(?:0777|0755|world)/i);
+        const caddyfile = fs.readFileSync(path.join(deploymentRoot, 'Caddyfile.example'), 'utf8');
+        expect(caddyfile.match(/import foundry_auth_log_filter/g)).toHaveLength(2);
+        expect(caddyfile.indexOf('(foundry_auth_log_filter)')).toBeLessThan(caddyfile.indexOf('log default'));
+        for (const field of ['code', 'state', 'id_token', 'access_token', 'error_description']) {
+            expect(caddyfile).toContain(`replace ${field} REDACTED`);
+        }
+        expect(caddyfile).toContain('request>headers>Referer delete');
+        expect(caddyfile).toContain('output file /var/log/caddy/foundry-access.log');
+        expect(caddyfile).not.toContain('log_skip');
         const installer = fs.readFileSync(path.join(deploymentRoot, 'install.sh'), 'utf8');
         expect(installer).toContain('/etc/systemd/system/caddy.service.d/10-foundry-logging.conf');
         expect(installer).toContain('foundry_inspect_release_link "${FOUNDRY_CURRENT_LINK}" current');
