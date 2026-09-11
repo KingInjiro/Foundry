@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -50,6 +51,8 @@ const backendEnvironment = {
     PLATFORM_DB_PATH: path.join(dataDirectory, 'platform.db'),
     LOCAL_AUTH_SESSION_SECRET: 'single-host-browser-session-secret-for-production-e2e',
     LOCAL_AUTH_SESSION_TTL_SECONDS: '3600',
+    GOOGLE_OAUTH_CLIENT_ID: 'foundry-test.apps.googleusercontent.com',
+    GOOGLE_OAUTH_CLIENT_SECRET: crypto.randomBytes(32).toString('hex'),
     LOCAL_STORAGE_SIGNING_SECRET: 'single-host-browser-storage-secret-for-production-e2e',
     LOCAL_STORAGE_UPLOAD_URL_TTL_SECONDS: '300',
     JOB_MODE: 'async',
@@ -68,7 +71,7 @@ const backendEnvironment = {
     TEST_JSON_LOGS: 'true'
 };
 
-const backend = spawn(process.execPath, ['dist/server.cjs'], {
+const backend = spawn(process.execPath, ['--import', './tests/helpers/googleOAuthE2E.mjs', 'dist/server.cjs'], {
     cwd: platformRoot,
     env: backendEnvironment,
     stdio: ['ignore', 'inherit', 'inherit']

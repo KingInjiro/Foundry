@@ -30,6 +30,8 @@ The existing release compatibility guard remains authoritative. A schema-8 relea
 
 ## References and validation
 
-The implementation follows [Google's server-side OpenID Connect flow](https://developers.google.com/identity/openid-connect/openid-connect). Proxy filtering uses Caddy's built-in [log filter and query fields](https://caddyserver.com/docs/caddyfile/directives/log#filter).
+The implementation follows [Google's server-side OpenID Connect flow](https://developers.google.com/identity/openid-connect/openid-connect). Proxy filtering uses Caddy's built-in [log filter and query fields](https://caddyserver.com/docs/caddyfile/directives/log#filter). The optional button uses the unchanged [official Google G asset](https://developers.google.com/static/identity/images/g-logo.png), bundled locally, and the [Google sign-in branding rules](https://developers.google.com/identity/branding-guidelines).
 
 `googleOAuth.test.js` verifies real RSA signatures using the production Google SDK with a test-only transport; `googleAuth.integration.test.js` covers HTTP state/replay/cancel/session/CSRF/local-auth/role/logging behavior. No test needs a live Google account or real credential. The draft PR CHECKPOINT records completed frontend/browser and release gates.
+
+`single-host.spec.js` also navigates through a simulated Google page on the Google origin and back to the actual compiled callback. The isolated test launcher preloads `tests/helpers/googleOAuthE2E.mjs`, which replaces only the SDK's network transport and issues synthetic codes on loopback. Signature verification, PKCE, nonce, cookies, database and session routes remain real. The preload, issuer and synthetic credentials are never included in the prebuilt release or production service. Existing local-only compiled smoke and restore rehearsal still run without Google configuration.
