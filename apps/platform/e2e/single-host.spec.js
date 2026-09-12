@@ -3,6 +3,118 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { expect, test } from '@playwright/test';
 import { LocalSqliteProvider } from '../src/platform/backend/database/LocalSqliteProvider.js';
+import { startProductionSpaServer } from '../tests/helpers/productionSpaServer.mjs';
+
+test.describe.serial('compiled SPA without Google credentials', () => {
+  let server;
+  test.beforeAll(async () => { server = await startProductionSpaServer(); });
+  test.afterAll(async () => { await server?.close(); });
+
+  test('a returning visitor renders the current root after legacy HTML revalidation', async ({ page, request }) => {
+    const runtimeErrors = watchRuntime(page);
+    const criticalAssets = [];
+    page.on('response', response => {
+      if (['script', 'stylesheet'].includes(response.request().resourceType())) {
+        criticalAssets.push({ url: response.url(), status: response.status(), type: response.headers()['content-type'], kind: response.request().resourceType() });
+      }
+    });
+    expect(await (await request.get(`${server.origin}/api/auth/google/config`)).json())
+      .toEqual({ success: true, data: { enabled: false } });
+
+    // Model the legacy cached document with different, same-length bundle
+    // hashes, as in the two real deployed releases. The normalized ZIP mtime
+    // and length collide under Express's old stat-based HTML validators.
+    const legacyHtml = server.index.replace(/(\/assets\/main-)[^./"']+(\.(?:js|css))/g, '$1previous$2');
+    expect(legacyHtml).not.toBe(server.index);
+    expect(Buffer.byteLength(legacyHtml)).toBe(Buffer.byteLength(server.index));
+    let revalidationStatus;
+    // Chromium does not reliably cache self-signed test HTTPS. Emulate only
+    // cache revalidation: the REAL compiled server decides 304 vs a new body.
+    // Assets, CSP, Google-disabled config, SQLite and sessions are not mocked.
+    await page.route(`${server.origin}/`, async route => {
+      const response = await request.get(route.request().url(), {
+        headers: { 'If-None-Match': server.legacyEtag, 'If-Modified-Since': server.lastModified }
+      });
+      revalidationStatus = response.status();
+      await route.fulfill({ response, status: 200, contentType: 'text/html', body: response.status() === 304 ? legacyHtml : await response.text() });
+    });
+    await page.goto(server.origin);
+    await expect(page.getByRole('link', { name: 'Foundry home' })).toBeVisible();
+    await expect(page.getByRole('navigation', { name: 'Primary navigation' })).toBeVisible();
+    expect(revalidationStatus).toBe(200);
+    expect(runtimeErrors).toEqual([]);
+    expect(criticalAssets.some(asset => asset.kind === 'script')).toBe(true);
+    expect(criticalAssets.some(asset => asset.kind === 'stylesheet')).toBe(true);
+    for (const asset of criticalAssets) {
+      expect(asset.status, asset.url).toBe(200);
+      expect(asset.type, asset.url).toMatch(asset.kind === 'script' ? /javascript/ : /text\/css/);
+    }
+    await page.unroute(`${server.origin}/`);
+
+    // Existing cached validators must also fail to suppress direct, fallback,
+    // HEAD and sandbox HTML. Hashed JS/CSS caching remains intact.
+    for (const pathname of ['/', '/index.html', '/developer', '/sandbox.html', '/generic-sandbox.html']) {
+      const initial = await request.get(server.origin + pathname);
+      for (const headers of [
+        { 'If-None-Match': server.legacyEtag },
+        { 'If-Modified-Since': server.lastModified }
+      ]) {
+        for (const method of ['GET', 'HEAD']) {
+          const response = await request.fetch(server.origin + pathname, { method, headers });
+          expect(response.status(), `${method} ${pathname}`).toBe(200);
+          expect(response.headers()['cache-control']).toBe('no-store');
+          expect(response.headers().etag).toBeUndefined();
+          expect(response.headers()['last-modified']).toBeUndefined();
+          expect(response.headers()['content-security-policy']).toBe(initial.headers()['content-security-policy']);
+        }
+      }
+    }
+    const script = await request.get(criticalAssets.find(asset => asset.kind === 'script').url);
+    expect(script.headers().etag).toBeTruthy();
+    expect(script.headers()['cache-control']).not.toContain('no-store');
+
+    await page.getByRole('button', { name: 'Sign In', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog.getByRole('button', { name: 'Continue with Google' })).toHaveCount(0);
+    await dialog.getByRole('tab', { name: 'Register' }).click();
+    await dialog.getByLabel('Username').fill('cache-regression-user');
+    await dialog.getByLabel('Password').fill(password);
+    await dialog.getByRole('button', { name: 'Create Account' }).click();
+    await expect(dialog).toBeHidden();
+    await page.getByRole('button', { name: 'Sign Out' }).click();
+    await page.getByRole('button', { name: 'Sign In', exact: true }).click();
+    await dialog.getByRole('tab', { name: 'Sign In', exact: true }).click();
+    await dialog.getByLabel('Username').fill('cache-regression-user');
+    await dialog.getByLabel('Password').fill(password);
+    await dialog.getByRole('button', { name: 'Sign In', exact: true }).click();
+    await expect(dialog).toBeHidden();
+    const currentSession = await page.context().request.get(`${server.origin}/api/auth/local/session`);
+    expect((await currentSession.json()).data.user.role).toBe('DEVELOPER');
+    await page.getByRole('button', { name: 'Sign Out' }).click();
+    expect(runtimeErrors).toEqual([]);
+  });
+
+  test('optional Google config failure leaves the root and local auth usable', async ({ page }) => {
+    const pageErrors = [];
+    page.on('pageerror', error => pageErrors.push(error.message));
+    await page.route(`${server.origin}/api/auth/google/config`, route => route.fulfill({ status: 503, contentType: 'application/json', body: '{"success":false}' }));
+    const config = page.waitForResponse(`${server.origin}/api/auth/google/config`);
+    await page.goto(server.origin);
+    expect((await config).status()).toBe(503);
+    await expect(page.getByRole('link', { name: 'Foundry home' })).toBeVisible();
+    const signIn = page.getByRole('button', { name: 'Sign In', exact: true });
+    await signIn.click();
+    const dialog = page.getByRole('dialog', { name: 'Sign in to Foundry' });
+    await expect(dialog.getByRole('button', { name: 'Continue with Google' })).toHaveCount(0);
+    await expect(dialog.getByLabel('Username')).toBeVisible();
+    await dialog.getByRole('tab', { name: 'Register' }).click();
+    await expect(page.getByRole('dialog', { name: 'Create a Foundry account' })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('dialog')).toBeHidden();
+    await expect(signIn).toBeFocused();
+    expect(pageErrors).toEqual([]);
+  });
+});
 
 const platformRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const baseURL = 'https://127.0.0.1:3443';

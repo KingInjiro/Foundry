@@ -65,10 +65,32 @@ readiness do not render the cached SPA. The existing single-host browser fixture
 also enables a mock Google provider; its disabled-config test mocks availability
 rather than launching a server with credentials absent.
 
-## Next
+## Fix checkpoint
 
-Add a compiled single-host regression for legacy HTML validators, missing Google
-credentials, visible root UI, critical asset MIME/status and local auth. Then
-disable HTML storage/file validators in the production frontend handler, keeping
-hashed asset caching and all CSP/auth protections. Run final gates; keep PR Draft.
-No merge, deployment, Engine core, or age-gate work.
+`server.js:startServer` now serves entry HTML with `Cache-Control: no-store`,
+`etag: false` and `lastModified: false`. This also handles validators cached before
+the fix. Explicit index/sandbox documents and fallback SPA routes share this
+policy; static hashed JS/CSS retain their existing caching. No auth, CSP, Google
+configuration, release format, updater, or Engine implementation changed.
+
+`e2e/single-host.spec.js` adds two tests to the existing Chromium gate, using
+`tests/helpers/productionSpaServer.mjs` to launch an isolated real compiled server
+without Google credentials or a Google preload. The helper models extracted ZIP
+timestamps. Tests cover cached-document revalidation, visible root landmarks,
+uncaught errors, critical JS/CSS status and MIME, HTML GET/HEAD validators, local
+Register/Sign In, and optional Google configuration failure with accessible local
+auth still available.
+
+On 2026-09-12 the persisted regression failed against the checksum-verified
+`b53124b` CI artifact at the missing `Foundry home` assertion, with the same module
+and stylesheet MIME errors. After rebuilding only the corrected server bundle
+against that same compiled client, both focused tests passed: **2/2, 5.9 seconds**.
+No assertion or timeout was weakened. A test-only assumption that reopening a
+dialog resets its selected tab was corrected by explicitly selecting Sign In.
+
+## Final gate tracking
+
+See PR #9 CHECKPOINT for results on the published head. Required gates: full
+check, normal/single-host Chromium, build/smoke/artifact, prebuilt rehearsal,
+audit high/critical, and Engine core comparison. Keep PR Draft; no merge,
+deployment or age-gate work. No production fix is claimed until owner deployment.
