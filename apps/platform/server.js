@@ -165,10 +165,21 @@ async function startServer() {
         app.use(viteServer.middlewares);
     } else {
         const distPath = path.join(process.cwd(), 'dist', 'client');
-        app.use(express.static(distPath));
-        app.get('*', (req, res) => {
-            res.sendFile(path.join(distPath, 'index.html'));
+        // Prebuilt ZIPs normalize mtimes. Equal-length HTML from different
+        // releases then has the same stat-based ETag/Last-Modified, causing a
+        // false 304 and references to removed bundles. Always send current HTML,
+        // including when a browser supplies validators cached before this fix.
+        const serveHtml = filename => (req, res) => res.sendFile(path.join(distPath, filename), {
+            etag: false,
+            lastModified: false,
+            cacheControl: false,
+            headers: { 'Cache-Control': 'no-store' }
         });
+        app.get(['/', '/index.html'], serveHtml('index.html'));
+        app.get('/sandbox.html', serveHtml('sandbox.html'));
+        app.get('/generic-sandbox.html', serveHtml('generic-sandbox.html'));
+        app.use(express.static(distPath, { index: false }));
+        app.get('*', serveHtml('index.html'));
     }
 
     const server = app.listen(PORT, HOST, () => {
