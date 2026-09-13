@@ -30,6 +30,11 @@ export async function checkStorageIntegrity(database, storage) {
         if (!session.objectKey) continue;
         if (session.status !== 'CLEANED') knownExactObjects.add(session.objectKey);
         const version = versionsById.get(session.versionId);
+        if (session.storageProvider && session.storageProvider !== storage.kind
+            && (session.status === 'VALIDATING' || REQUIRED_PACKAGE_VERSION_STATES.has(version?.status)
+                || REQUIRED_RUNTIME_VERSION_STATES.has(version?.status))) {
+            issues.push({ code: 'STORAGE_PROVIDER_MISMATCH', sessionId: session.id, expected: session.storageProvider, actual: storage.kind });
+        }
         if (session.status === 'VALIDATING' || REQUIRED_PACKAGE_VERSION_STATES.has(version?.status)) {
             required.push({ kind: 'source-package', key: session.objectKey, gameId: session.gameId, versionId: session.versionId, sessionId: session.id });
         }

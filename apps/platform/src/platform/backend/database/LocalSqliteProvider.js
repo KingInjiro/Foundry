@@ -1221,7 +1221,7 @@ export class LocalSqliteProvider extends DatabaseProvider {
                 ORDER BY gameId, createdAt, id
             `).all(),
             uploadSessions: this.db.prepare(`
-                SELECT id, gameId, versionId, objectKey, status, expiresAt, completedAt
+                SELECT id, gameId, versionId, storageProvider, objectKey, status, expiresAt, completedAt
                 FROM upload_sessions
                 ORDER BY createdAt, id
             `).all()

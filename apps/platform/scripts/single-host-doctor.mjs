@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { validateProductionConfiguration } from '../src/platform/backend/config/productionConfig.js';
 import { verifySqliteDatabase } from '../src/platform/backend/database/SqliteRecovery.js';
 import { verifySingleHostBackup } from '../src/platform/backend/recovery/SingleHostRecovery.js';
+import { createRecoveryStorage, checkSqliteStorageIntegrity, EXTERNAL_STORAGE_BACKUP_FORMAT } from '../src/platform/backend/recovery/ExternalStorageRecovery.js';
+import { resolveStorageProvider, profileSupportsStorage } from '../src/platform/backend/config/storageConfig.js';
 
 const platformRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -21,8 +23,15 @@ function readJson(filePath, label) {
     }
 }
 
-export function checkReleaseCompatibility(releaseDirectory, databasePath) {
+export function checkReleaseCompatibility(releaseDirectory, databasePath, env = process.env) {
     const releaseRoot = path.resolve(releaseDirectory);
+    const selected = resolveStorageProvider(env, 'single-host');
+    if (selected === 'r2') {
+        const client = readJson(path.join(releaseRoot, 'apps/platform/dist/client/deployment-profile.json'), 'Client deployment profile');
+        if (!profileSupportsStorage(client, 'single-host', selected) || !client.supportedStorageProviders?.includes('r2')) {
+            throw new Error('Rollback is unsafe: target release does not support single-host R2 storage.');
+        }
+    }
     const profile = readJson(path.join(releaseRoot, 'apps', 'platform', 'dist', 'server-profile.json'), 'Server profile');
     if (profile.schemaVersion !== 1 || !Number.isSafeInteger(profile.maximumDatabaseMigration)) {
         throw new Error('Target release server profile is malformed.');
@@ -111,7 +120,19 @@ async function doctor(argv = process.argv) {
         };
     });
 
-    record('objects', () => {
+    let storage;
+    if (config?.storageProvider === 'r2') {
+        try {
+            storage = createRecoveryStorage();
+            if (!await storage.ping()) throw new Error('R2 is not available.');
+            const integrity = await checkSqliteStorageIntegrity(databasePath, storage);
+            if (integrity.status !== 'PASS') throw new Error(`Storage integrity failed (${integrity.counts.missingOrInvalid} issue(s)).`);
+            checks.objects = { status: 'PASS', provider: 'r2', localObjects: false, integrity };
+        } catch (error) {
+            checks.objects = { status: 'FAIL', message: error.message };
+            failures.push(`objects: ${error.message}`);
+        }
+    } else record('objects', () => {
         const objects = path.join(dataDirectory, 'objects');
         const stat = fs.lstatSync(objects);
         if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('Object root must be a real directory.');
@@ -122,7 +143,7 @@ async function doctor(argv = process.argv) {
     record('releaseProfiles', () => {
         const client = readJson(path.join(platformRoot, 'dist', 'client', 'deployment-profile.json'), 'Client deployment profile');
         const server = readJson(path.join(platformRoot, 'dist', 'server-profile.json'), 'Server profile');
-        if (client.deploymentMode !== 'single-host' || client.authProvider !== 'local' || client.storageProvider !== 'local-disk') {
+        if (!profileSupportsStorage(client, 'single-host', config?.storageProvider || 'local-disk')) {
             throw new Error('Client artifact is not a single-host build.');
         }
         const currentMigration = Number(database?.schemaMigrations.at(-1)?.version || 0);
@@ -132,7 +153,7 @@ async function doctor(argv = process.argv) {
         return {
             clientMode: client.deploymentMode,
             authProvider: client.authProvider,
-            storageProvider: client.storageProvider,
+            storageProvider: config?.storageProvider || client.storageProvider,
             maximumDatabaseMigration: server.maximumDatabaseMigration
         };
     });
@@ -146,13 +167,14 @@ async function doctor(argv = process.argv) {
         if (!backups.length) throw new Error('No coordinated single-host backup exists yet.');
         const latest = backups[0];
         const manifest = readJson(path.join(latest.path, 'manifest.json'), 'Latest backup manifest');
-        if (manifest.format !== 'foundry-single-host-backup-v1') throw new Error('Latest backup format is invalid.');
-        return { latest: latest.path, createdAt: manifest.createdAt, objectCount: manifest.objects?.count };
+        if (!['foundry-single-host-backup-v1', EXTERNAL_STORAGE_BACKUP_FORMAT].includes(manifest.format)) throw new Error('Latest backup format is invalid.');
+        return { latest: latest.path, createdAt: manifest.createdAt, objectCount: manifest.objects?.count,
+            remoteObjectsIncluded: manifest.format === EXTERNAL_STORAGE_BACKUP_FORMAT ? false : undefined };
     }, { warning: true });
 
     if (argv.includes('--verify-backup') && checks.backup?.status === 'PASS') {
         try {
-            const verified = await verifySingleHostBackup(checks.backup.latest);
+            const verified = await verifySingleHostBackup(checks.backup.latest, { storage });
             checks.backupIntegrity = { status: 'PASS', objectCount: verified.objects.count, databaseSha256: verified.database.sha256 };
         } catch (error) {
             checks.backupIntegrity = { status: 'FAIL', message: error.message };
@@ -167,6 +189,7 @@ async function doctor(argv = process.argv) {
         return { enabled: status.enabled.value, active: status.active.value };
     }, { warning: true });
 
+    storage?.client?.destroy();
     return {
         status: failures.length ? 'FAIL' : (warnings.length ? 'WARN' : 'PASS'),
         checkedAt: new Date().toISOString(),

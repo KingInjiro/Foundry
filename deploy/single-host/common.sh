@@ -277,6 +277,27 @@ foundry_wait_ready() {
 
 foundry_check_release_compatibility() {
     local release="$1"
+    case "${FOUNDRY_STORAGE_PROVIDER:-local-disk}" in
+        local-disk) ;;
+        r2)
+            # This guard belongs to installed operator tooling: an old target
+            # doctor knows only SQLite and must not approve a disk-only runtime.
+            foundry_run_as_service "$(command -v node)" --input-type=module -e '
+                import fs from "node:fs";
+                import path from "node:path";
+                const profile = JSON.parse(fs.readFileSync(path.join(process.argv[1], "apps/platform/dist/client/deployment-profile.json"), "utf8"));
+                const supported = profile.supportedStorageProviders;
+                if (profile.schemaVersion !== 2 || profile.deploymentMode !== "single-host" || profile.authProvider !== "local"
+                    || profile.firebaseProjectId || profile.firebaseAuthDomain
+                    || !Array.isArray(supported) || new Set(supported).size !== supported.length
+                    || !supported.every(value => ["local-disk", "r2"].includes(value))
+                    || !supported.includes(profile.storageProvider) || !supported.includes("r2")) {
+                    throw new Error("Rollback is unsafe: target release does not support single-host R2 storage.");
+                }
+            ' "${release}" || return 1
+            ;;
+        *) echo 'Foundry: invalid FOUNDRY_STORAGE_PROVIDER.' >&2; return 1 ;;
+    esac
     foundry_run_as_service \
         "$(command -v node)" \
         "${release}/apps/platform/scripts/single-host-doctor.mjs" \

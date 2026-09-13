@@ -6,6 +6,7 @@ import { LocalSqliteProvider } from '../database/LocalSqliteProvider.js';
 import { LocalDiskStorageProvider } from '../storage/LocalDiskStorageProvider.js';
 import { checkStorageIntegrity } from '../storage/StorageIntegrityChecker.js';
 import { restoreSingleHostBackup } from './SingleHostRecovery.js';
+import { readOnlyExternalStorage } from './ExternalStorageRecovery.js';
 
 const REHEARSAL_SESSION_SECRET = 'single-host-rehearsal-session-secret-not-used-by-production';
 const REHEARSAL_STORAGE_SECRET = 'single-host-rehearsal-storage-secret-not-used-by-production';
@@ -19,15 +20,15 @@ function rehearsalJobs() {
     };
 }
 
-export async function rehearseSingleHostBackup({ backupDirectory }) {
+export async function rehearseSingleHostBackup({ backupDirectory, storage: externalStorage = null }) {
     const rehearsalRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'foundry-single-host-rehearsal-'));
     const targetDataDirectory = path.join(rehearsalRoot, 'data');
     let database;
     let server;
     try {
-        const restore = await restoreSingleHostBackup({ backupDirectory, targetDataDirectory });
+        const restore = await restoreSingleHostBackup({ backupDirectory, targetDataDirectory, storage: externalStorage });
         database = new LocalSqliteProvider(path.join(targetDataDirectory, 'platform.db'));
-        const storage = new LocalDiskStorageProvider(
+        const storage = externalStorage ? readOnlyExternalStorage(externalStorage) : new LocalDiskStorageProvider(
             path.join(targetDataDirectory, 'objects'),
             '/api/storage/upload',
             { uploadSigningSecret: REHEARSAL_STORAGE_SECRET }
@@ -94,7 +95,8 @@ export async function rehearseSingleHostBackup({ backupDirectory }) {
             restore: {
                 databaseSha256: restore.database.sha256,
                 objectCount: restore.objects.count,
-                objectBytes: restore.objects.totalBytes
+                objectBytes: restore.objects.totalBytes,
+                ...(externalStorage && { remoteObjectsIncluded: false })
             },
             health: { httpStatus: health.status, deploymentMode: healthPayload.data.deploymentMode },
             readiness: { httpStatus: ready.status, checks: readyPayload.data.checks },
