@@ -97,7 +97,8 @@ Usage: foundry <command> [options]
   status                         Show systemd service status
   logs [lines]                   Show recent structured service logs
   doctor [--verify-backup]       Check runtime, disk, DB, objects, release, backup, service
-  backup [--output PATH]         Stop/drain, snapshot DB + objects, restart
+  backup [--output PATH]         Stop/drain, snapshot DB + disk objects or R2 inventory, restart
+  storage-check                 Verify selected storage references (read-only)
   rehearse --backup PATH         Restore and boot an isolated backup rehearsal
   restore --backup P --target P --confirm-new-target
                                  Restore only into a new data directory

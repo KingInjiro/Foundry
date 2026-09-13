@@ -4,6 +4,164 @@ import { fileURLToPath } from 'node:url';
 import { expect, test } from '@playwright/test';
 import { LocalSqliteProvider } from '../src/platform/backend/database/LocalSqliteProvider.js';
 import { startProductionSpaServer } from '../tests/helpers/productionSpaServer.mjs';
+import { controlledR2 } from '../tests/helpers/controlledR2.mjs';
+import { createSingleHostBackup, verifySingleHostBackup } from '../src/platform/backend/recovery/SingleHostRecovery.js';
+import { rehearseSingleHostBackup } from '../src/platform/backend/recovery/SingleHostRehearsal.js';
+
+test.describe.serial('compiled single-host with private R2 objects', () => {
+  test.use({ proxy: { server: 'http://127.0.0.1:3447', bypass: '127.0.0.1,localhost' } });
+  let server;
+  let r2;
+  test.beforeAll(async () => {
+    r2 = await controlledR2({ browserProxyPort: 3447 });
+    server = await startProductionSpaServer({ r2 });
+    r2.setAllowedOrigin(server.origin);
+  });
+  test.afterAll(async () => { await server?.close(); await r2?.close(); });
+
+  test('local auth, signed browser upload, publish/Player, recovery and revocation use R2 without local objects', async ({ page, context }) => {
+    const errors = [];
+    page.on('pageerror', error => errors.push(error.message));
+    page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+    page.on('requestfailed', request => errors.push(`${request.method()} ${new URL(request.url()).pathname}: ${request.failure()?.errorText}`));
+    const origins = [r2.env.R2_ENDPOINT, `https://${r2.env.R2_BUCKET_NAME}.${new URL(r2.env.R2_ENDPOINT).host}`];
+    const landing = await page.goto(server.origin);
+    const csp = landing.headers()['content-security-policy'];
+    expect(csp).toContain(`connect-src 'self' ${origins.join(' ')}`);
+    expect(csp).not.toContain('*.r2.');
+    await expect(page.getByRole('link', { name: 'Foundry home' })).toBeVisible();
+    await page.getByRole('button', { name: 'Sign In', exact: true }).click();
+    const auth = page.getByRole('dialog');
+    await expect(auth.getByRole('button', { name: 'Continue with Google' })).toHaveCount(0);
+    await auth.getByRole('tab', { name: 'Register' }).click();
+    await auth.getByLabel('Username').fill('r2-owner');
+    await auth.getByLabel('Password').fill(password);
+    await auth.getByRole('button', { name: 'Create Account' }).click();
+    await expect(auth).toBeHidden();
+    const currentSession = async () => (await (await context.request.get(`${server.origin}/api/auth/local/session`)).json()).data;
+    const signedIn = await currentSession();
+    expect(signedIn.user.role).toBe('DEVELOPER');
+    expect((await context.request.post(`${server.origin}/api/games`, { headers: { Origin: server.origin }, data: { title: 'CSRF must reject' } })).status()).toBe(403);
+    const mutation = async (endpoint, method, data) => context.request.fetch(server.origin + endpoint, {
+      method, data, headers: { Origin: server.origin, 'X-CSRF-Token': (await currentSession()).csrfToken }
+    });
+    await page.goto(`${server.origin}/developer`);
+    await page.getByRole('button', { name: 'Upload Game Package' }).click();
+    const upload = page.getByRole('dialog', { name: 'Upload Game Package' });
+    await upload.getByLabel('Choose game ZIP package').setInputFiles(packagePath);
+    await expect(upload.getByText('Package is ready')).toBeVisible();
+    const remotePut = page.waitForResponse(response => origins.includes(new URL(response.url()).origin) && response.request().method() === 'PUT');
+    await upload.getByRole('button', { name: 'Upload Version' }).click();
+    const putResponse = await remotePut;
+    expect(putResponse.status()).toBe(200);
+    expect(putResponse.headers()['access-control-allow-origin']).toBe(server.origin);
+    expect(putResponse.headers()['access-control-expose-headers']).toBeUndefined();
+    const putHeaders = await putResponse.request().allHeaders();
+    expect(putHeaders['content-type']).toBe('application/zip');
+    expect(putHeaders.cookie).toBeUndefined();
+    expect(putHeaders.authorization).toBeUndefined();
+    expect(putHeaders['x-csrf-token']).toBeUndefined();
+    expect(putResponse.url()).not.toContain(r2.env.R2_SECRET_ACCESS_KEY);
+    expect(r2.requests.some(r => r.method === 'OPTIONS' && r.origin === server.origin && r.requestedMethod === 'PUT' && r.requestedHeaders === 'content-type')).toBe(true);
+    await expect(upload.getByText('Version uploaded')).toBeVisible({ timeout: 60000 });
+    await upload.getByRole('button', { name: 'Manage & Publish' }).click();
+    await expect(page.getByText('READY', { exact: true })).toBeVisible({ timeout: 60000 });
+    const gameId = new URL(page.url()).pathname.split('/').pop();
+    await page.getByRole('button', { name: 'Publish', exact: true }).click();
+    await expect(page.getByText('Active', { exact: true }).first()).toBeVisible({ timeout: 60000 });
+    const detail = await context.request.get(`${server.origin}/api/catalog/games/${gameId}`);
+    expect(detail.status()).toBe(200);
+    const game = (await detail.json()).data;
+    const entry = server.origin + game.storageRef.location + '/' + game.entry;
+    const versionId = game.storageRef.location.split('/')[6];
+    const ranged = await context.request.get(entry, { headers: { Range: 'bytes=0-8' } });
+    expect(ranged.status()).toBe(206);
+    const fullEntry = await context.request.get(entry);
+    expect(fullEntry.headers()['content-type']).toMatch(/^text\/html/);
+    expect(ranged.headers()['content-range']).toBe(`bytes 0-8/${(await fullEntry.body()).length}`);
+    expect(await ranged.body()).toEqual((await fullEntry.body()).subarray(0, 9));
+    await page.goto(`${server.origin}/player/game/${gameId}`);
+    await page.getByRole('button', { name: 'Play Now' }).click();
+    await expect(page.frameLocator('iframe[title^="Game "]').frameLocator('iframe[title="Published web game"]').getByTestId('generic-game-ready')).toHaveText('GENERIC E2E GAME READY', { timeout: 30000 });
+    expect(errors).toEqual([]);
+    expect([...r2.objects.keys()].some(key => key.startsWith(`${r2.env.R2_OBJECT_PREFIX}/games/${gameId}/versions/`) && key.endsWith('/extracted/index.html'))).toBe(true);
+    expect(fs.readdirSync(path.join(server.data, 'objects'))).toEqual(['.tmp']);
+    let projectTitle;
+    const db = new LocalSqliteProvider(path.join(server.data, 'platform.db'));
+    try {
+      expect((await db.getStorageIntegritySnapshot()).uploadSessions.every(session => session.storageProvider === 'r2')).toBe(true);
+      projectTitle = (await db.getGame(gameId)).title;
+      // Test-only operator provisioning in this isolated DB; production auth is unchanged.
+      await db.provisionUserRole({ uid: signedIn.user.uid, role: 'MODERATOR' });
+    } finally { await db.close(); }
+    for (const state of ['QUARANTINED', 'ACTIVE']) {
+      const moderation = await mutation(`/api/moderation/games/${gameId}`, 'PATCH', { moderationState: state, reason: 'Isolated private R2 revocation acceptance.' });
+      expect(moderation.status()).toBe(200);
+      expect((await context.request.get(entry)).status()).toBe(state === 'ACTIVE' ? 200 : 404);
+    }
+    expect((await mutation(`/api/games/${gameId}/unpublish`, 'POST', {})).status()).toBe(200);
+    expect((await context.request.get(entry)).status()).toBe(404);
+    expect((await mutation(`/api/games/${gameId}/versions/${versionId}/activate`, 'POST', {})).status()).toBe(200);
+    expect((await context.request.get(entry)).status()).toBe(200);
+    await page.goto(server.origin);
+    r2.setUnavailable(true);
+    const unavailable = await context.request.get(`${server.origin}/api/ready`);
+    expect(unavailable.status()).toBe(503);
+    expect((await unavailable.json()).data.checks.storage).toBe(false);
+    r2.setUnavailable(false);
+    expect((await context.request.get(`${server.origin}/api/ready`)).status()).toBe(200);
+    await server.stopBackend();
+    const backupDirectory = path.join(server.data, 'backups', 'foundry-backup-r2-browser');
+    const backup = await createSingleHostBackup({ dataDirectory: server.data, outputDirectory: backupDirectory, storage: r2.storage });
+    expect(backup.objects.remoteObjectsIncluded).toBe(false);
+    expect((await verifySingleHostBackup(backupDirectory, { storage: r2.storage })).status).toBe('PASS');
+    const rehearsal = await rehearseSingleHostBackup({ backupDirectory, storage: r2.storage });
+    expect(rehearsal).toMatchObject({ status: 'PASS', readiness: { httpStatus: 200 }, storageIntegrity: { status: 'PASS' }, publishedAsset: { status: 'PASS' } });
+    await server.restart();
+    expect((await currentSession()).user.uid).toBe(signedIn.user.uid);
+    expect((await context.request.get(entry, { headers: { Range: 'bytes=0-8' } })).status()).toBe(206);
+    const deleted = await mutation(`/api/games/${gameId}`, 'DELETE', { confirmTitle: projectTitle });
+    expect(deleted.status()).toBe(202);
+    expect((await deleted.json()).data.status).toBe('DELETING');
+    expect((await context.request.get(entry)).status()).toBe(404);
+    await expect.poll(() => [...r2.objects.keys()].filter(key => key.startsWith(`${r2.env.R2_OBJECT_PREFIX}/games/${gameId}/`)).length).toBe(0);
+    expect(r2.requests.some(request => request.method === 'POST')).toBe(true);
+    expect(r2.requests.filter(request => request.list).every(request => request.key === '')).toBe(true);
+    expect(server.logs.join('')).not.toContain(r2.env.R2_ACCESS_KEY_ID);
+    expect(server.logs.join('')).not.toContain(r2.env.R2_SECRET_ACCESS_KEY);
+    expect(server.logs.join('')).not.toContain('X-Amz-Signature');
+    await page.reload();
+    await page.getByRole('button', { name: 'Sign Out' }).click();
+    await expect(page.getByRole('button', { name: 'Sign In', exact: true })).toBeVisible();
+  });
+
+  test('Chromium enforces exact CSP and minimal CORS without exposed headers or public reads', async ({ page }) => {
+    await page.goto(server.origin);
+    const put = (url, headers = { 'Content-Type': 'application/zip' }) => page.evaluate(async ({ url, headers }) => {
+      try {
+        const response = await fetch(url, { method: 'PUT', headers, body: 'browser transport bytes' });
+        return { status: response.status, etag: response.headers.get('etag') };
+      } catch { return { rejected: true }; }
+    }, { url, headers });
+    const signed = async name => (await r2.storage.createUploadSession(`games/cors/${name}.zip`)).uploadUrl;
+    expect(await put(await signed('minimal'))).toEqual({ status: 200, etag: null });
+    const readUrl = new URL(await signed('minimal')); readUrl.search = '';
+    expect((await r2.forwardRequest(readUrl.href, { method: 'GET' })).status).toBe(403);
+    expect(await put(await signed('content-type'), { 'Content-Type': 'text/plain' })).toEqual({ status: 403, etag: null });
+    const offset = r2.requests.length;
+    expect(await put(await signed('extra-header'), { 'Content-Type': 'application/zip', 'X-Not-Allowed': 'blocked' })).toEqual({ rejected: true });
+    r2.setAllowedOrigin('https://different-installation.invalid');
+    try { expect(await put(await signed('wrong-origin'))).toEqual({ rejected: true }); }
+    finally { r2.setAllowedOrigin(server.origin); }
+    expect(r2.requests.slice(offset).filter(r => r.method === 'PUT')).toEqual([]);
+    const violation = page.evaluate(() => new Promise(resolve => {
+      document.addEventListener('securitypolicyviolation', event => resolve({ directive: event.effectiveDirective, blocked: event.blockedURI }), { once: true });
+      void fetch('https://different-account.r2.cloudflarestorage.com/upload', { method: 'PUT', body: 'blocked' }).catch(() => {});
+    }));
+    expect(await violation).toEqual({ directive: 'connect-src', blocked: 'https://different-account.r2.cloudflarestorage.com/upload' });
+    await r2.storage.deletePrefix('games/cors');
+  });
+});
 
 test.describe.serial('compiled SPA without Google credentials', () => {
   let server;

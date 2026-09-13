@@ -44,7 +44,15 @@ export class R2StorageProvider extends StorageProvider {
     }
 
     async sign(command, options) {
-        try { return await getSignedUrl(this.client, command, options); }
+        // A presigned PUT has no body yet. The SDK's automatic optional CRC32
+        // would sign the empty-body checksum and reject the browser's real ZIP.
+        // Override only this signing context, without mutating the shared client
+        // or changing checksums for server uploads, deletes or downloads.
+        const signingClient = command instanceof PutObjectCommand ? {
+            ...this.client,
+            config: { ...this.client.config, requestChecksumCalculation: async () => 'WHEN_REQUIRED' }
+        } : this.client;
+        try { return await getSignedUrl(signingClient, command, options); }
         catch (error) { throw this.operationError(error); }
     }
 
