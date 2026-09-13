@@ -171,7 +171,13 @@ export function verifyReleaseDirectory(releaseDirectory) {
         clientProfile.schemaVersion !== 2
         || clientProfile.deploymentMode !== 'single-host'
         || clientProfile.authProvider !== 'local'
-        || clientProfile.storageProvider !== 'local-disk'
+        || !['local-disk', 'r2'].includes(clientProfile.storageProvider)
+        || (clientProfile.supportedStorageProviders !== undefined && (
+            !Array.isArray(clientProfile.supportedStorageProviders)
+            || !clientProfile.supportedStorageProviders.includes(clientProfile.storageProvider)
+            || new Set(clientProfile.supportedStorageProviders).size !== clientProfile.supportedStorageProviders.length
+            || clientProfile.supportedStorageProviders.some(value => !['local-disk', 'r2'].includes(value))
+        ))
         || clientProfile.firebaseProjectId
         || clientProfile.firebaseAuthDomain
     ) fail('client artifact is not a fail-closed single-host build.');

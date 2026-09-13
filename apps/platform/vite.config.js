@@ -3,6 +3,7 @@ import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import { resolve } from 'path';
 import { DEPLOYMENT_MODES, resolveDeploymentMode } from './src/platform/backend/config/deploymentMode.js';
+import { resolveStorageProvider } from './src/platform/backend/config/storageConfig.js';
 
 export function validateFirebaseClientBuildConfig(env, mode) {
   if (mode !== 'production') return;
@@ -31,14 +32,14 @@ export function createDeploymentProfile(env, mode) {
     schemaVersion: 2,
     deploymentMode,
     authProvider: deploymentMode === DEPLOYMENT_MODES.CLOUD ? 'firebase' : 'local',
-    storageProvider: deploymentMode === DEPLOYMENT_MODES.CLOUD ? 'r2' : 'local-disk'
+    storageProvider: resolveStorageProvider(env, deploymentMode)
   };
   if (deploymentMode === DEPLOYMENT_MODES.CLOUD) return {
     ...profile,
     firebaseProjectId: env.VITE_FIREBASE_PROJECT_ID,
     firebaseAuthDomain: env.VITE_FIREBASE_AUTH_DOMAIN
   };
-  return profile;
+  return { ...profile, supportedStorageProviders: ['local-disk', 'r2'] };
 }
 
 export default defineConfig(({ mode }) => {

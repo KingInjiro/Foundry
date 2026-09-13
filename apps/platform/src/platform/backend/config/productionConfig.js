@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DEPLOYMENT_MODES, resolveDeploymentMode } from './deploymentMode.js';
+import { profileSupportsStorage, resolveStorageProvider, r2UploadOrigins } from './storageConfig.js';
 
 const BOOLEAN_VALUES = new Set(['true', 'false']);
 const LOG_LEVELS = new Set(['debug', 'info', 'warn', 'error']);
@@ -76,7 +77,7 @@ function validateSecret(env, key, errors, minimumBytes = 32) {
     return value;
 }
 
-function loadClientBuildProfile(env, deploymentMode, errors) {
+function loadClientBuildProfile(env, deploymentMode, storageProvider, errors) {
     const configuredPath = hasValue(env.PLATFORM_CLIENT_BUILD_PROFILE)
         ? env.PLATFORM_CLIENT_BUILD_PROFILE.trim()
         : path.resolve(process.cwd(), 'dist/client/deployment-profile.json');
@@ -87,15 +88,8 @@ function loadClientBuildProfile(env, deploymentMode, errors) {
     }
     try {
         profile = JSON.parse(fs.readFileSync(configuredPath, 'utf8'));
-        const expectedAuthProvider = deploymentMode === DEPLOYMENT_MODES.CLOUD ? 'firebase' : 'local';
-        const expectedStorageProvider = deploymentMode === DEPLOYMENT_MODES.CLOUD ? 'r2' : 'local-disk';
-        if (
-            profile.schemaVersion !== 2
-            || profile.deploymentMode !== deploymentMode
-            || profile.authProvider !== expectedAuthProvider
-            || profile.storageProvider !== expectedStorageProvider
-        ) {
-            errors.push('The built client deployment profile does not match FOUNDRY_DEPLOYMENT_MODE. Rebuild the client for this environment.');
+        if (!profileSupportsStorage(profile, deploymentMode, storageProvider)) {
+            errors.push('The built client deployment profile does not match FOUNDRY_DEPLOYMENT_MODE or the selected storage provider. Rebuild the client for this environment.');
         }
     } catch {
         errors.push('PLATFORM_CLIENT_BUILD_PROFILE is not valid JSON.');
@@ -125,6 +119,10 @@ export function validateProductionConfiguration(env = process.env) {
         errors.push(error.message);
         deploymentMode = DEPLOYMENT_MODES.CLOUD;
     }
+
+    let storageProvider;
+    try { storageProvider = resolveStorageProvider(env, deploymentMode); }
+    catch (error) { errors.push(error.message); }
 
     const trustProxyHops = parseInteger(env, 'TRUST_PROXY_HOPS', {
         fallback: 0, min: 0, max: 3, errors
@@ -214,9 +212,9 @@ export function validateProductionConfiguration(env = process.env) {
             errors.push('FOUNDRY_DATA_DIR must be an absolute non-root persistent directory in single-host mode.');
         } else {
             validateWritableDirectory(dataDirectory, 'FOUNDRY_DATA_DIR', errors);
-            objectStoragePath = path.join(dataDirectory, 'objects');
+            objectStoragePath = storageProvider === 'local-disk' ? path.join(dataDirectory, 'objects') : null;
             backupPath = path.join(dataDirectory, 'backups');
-            validateWritableDirectory(objectStoragePath, 'The single-host objects directory', errors);
+            if (objectStoragePath) validateWritableDirectory(objectStoragePath, 'The single-host objects directory', errors);
             validateWritableDirectory(backupPath, 'The single-host backups directory', errors);
             if (!databasePath) databasePath = path.join(dataDirectory, 'platform.db');
             if (!isPathInside(dataDirectory, databasePath) && env.SINGLE_HOST_ALLOW_EXTERNAL_DB_PATH !== 'true') {
@@ -234,7 +232,8 @@ export function validateProductionConfiguration(env = process.env) {
         }
 
         const sessionSecret = validateSecret(env, 'LOCAL_AUTH_SESSION_SECRET', errors);
-        const storageSecret = validateSecret(env, 'LOCAL_STORAGE_SIGNING_SECRET', errors);
+        const storageSecret = storageProvider === 'local-disk'
+            ? validateSecret(env, 'LOCAL_STORAGE_SIGNING_SECRET', errors) : null;
         if (sessionSecret && storageSecret && sessionSecret === storageSecret) {
             errors.push('LOCAL_AUTH_SESSION_SECRET and LOCAL_STORAGE_SIGNING_SECRET must be distinct secrets.');
         }
@@ -246,9 +245,6 @@ export function validateProductionConfiguration(env = process.env) {
         });
     } else {
         validateDatabasePath(databasePath, errors);
-        if (env.R2_DIRECT_DOWNLOADS === 'true') {
-            errors.push('R2_DIRECT_DOWNLOADS must remain false in production because issued signed URLs cannot be revoked immediately by moderation.');
-        }
 
         firebaseProjectId = hasValue(env.FIREBASE_PROJECT_ID) ? env.FIREBASE_PROJECT_ID.trim() : '';
         if (!/^[a-z][a-z0-9-]{4,61}[a-z0-9]$/.test(firebaseProjectId)) {
@@ -270,6 +266,12 @@ export function validateProductionConfiguration(env = process.env) {
             }
         }
 
+    }
+
+    if (storageProvider === 'r2') {
+        if (env.R2_DIRECT_DOWNLOADS === 'true') {
+            errors.push('R2_DIRECT_DOWNLOADS must remain false in production because issued signed URLs cannot be revoked immediately by moderation.');
+        }
         const requiredR2 = ['R2_ACCOUNT_ID', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_BUCKET_NAME', 'R2_ENDPOINT'];
         for (const key of requiredR2) {
             if (!hasValue(env[key])) errors.push(`${key} is required.`);
@@ -297,7 +299,7 @@ export function validateProductionConfiguration(env = process.env) {
         });
     }
 
-    const clientBuild = loadClientBuildProfile(env, deploymentMode, errors);
+    const clientBuild = loadClientBuildProfile(env, deploymentMode, storageProvider, errors);
     if (
         deploymentMode === DEPLOYMENT_MODES.CLOUD
         && clientBuild.profile
@@ -320,7 +322,7 @@ export function validateProductionConfiguration(env = process.env) {
         production: true,
         deploymentMode,
         authProvider: deploymentMode === DEPLOYMENT_MODES.CLOUD ? 'firebase' : 'local',
-        storageProvider: deploymentMode === DEPLOYMENT_MODES.CLOUD ? 'r2' : 'local-disk',
+        storageProvider,
         publicBaseUrl: publicBaseUrl.origin,
         databasePath,
         dataDirectory,
@@ -329,6 +331,7 @@ export function validateProductionConfiguration(env = process.env) {
         firebaseProjectId,
         clientBuildProfilePath: clientBuild.path,
         r2Endpoint: r2Endpoint?.href || null,
+        r2UploadOrigins: r2Endpoint ? r2UploadOrigins(r2Endpoint.href, env.R2_BUCKET_NAME.trim()) : [],
         port,
         trustProxyHops,
         shutdownGraceMs,

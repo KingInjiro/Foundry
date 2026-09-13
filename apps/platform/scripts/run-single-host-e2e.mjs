@@ -1,3 +1,4 @@
+import { profileSupportsStorage } from '../src/platform/backend/config/storageConfig.js';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -24,7 +25,7 @@ try {
     run(process.execPath, ['scripts/verify-single-host-persistence.mjs'], testEnvironment, platformRoot);
 
     const profile = JSON.parse(fs.readFileSync(path.join(platformRoot, 'dist', 'client', 'deployment-profile.json'), 'utf8'));
-    if (profile.deploymentMode !== 'single-host' || profile.authProvider !== 'local' || profile.storageProvider !== 'local-disk') {
+    if (!profileSupportsStorage(profile, 'single-host', 'local-disk')) {
         throw new Error('Single-host Chromium ran against the wrong client build profile.');
     }
 } catch (error) {

@@ -3,6 +3,37 @@ import { describe, expect, it, vi } from 'vitest';
 import { R2StorageProvider } from '../../../src/platform/backend/storage/R2StorageProvider.js';
 
 describe('R2StorageProvider', () => {
+    it.each(['', '/', '////', '.', '..', '/games/', 'games/../', 'games//', 'games\\bad', 'games/\u0000'])('refuses unsafe list/delete prefix %j before S3 calls', async prefix => {
+        const provider = Object.create(R2StorageProvider.prototype);
+        provider.isConfigured = true;
+        provider.client = { send: vi.fn() };
+        await expect(provider.listObjects(prefix)).rejects.toThrow('unsafe R2 prefix');
+        await expect(provider.deletePrefix(prefix)).rejects.toThrow('unsafe R2 prefix');
+        expect(provider.client.send).not.toHaveBeenCalled();
+    });
+
+    it('fails closed on incomplete pagination and does not delete out-of-prefix keys', async () => {
+        const provider = Object.create(R2StorageProvider.prototype);
+        provider.isConfigured = true;
+        provider.client = { send: vi.fn(async () => ({ IsTruncated: true, Contents: [] })) };
+        await expect(provider.listObjects('games/')).rejects.toThrow('pagination');
+        provider.client.send.mockResolvedValue({ Contents: [{ Key: 'other-tenant/object' }], IsTruncated: false });
+        await expect(provider.deletePrefix('games/one')).rejects.toThrow('escaped');
+        expect(provider.client.send.mock.calls.every(([command]) => command instanceof ListObjectsV2Command)).toBe(true);
+        provider.client.send.mockResolvedValue({ IsTruncated: true, NextContinuationToken: 'same', Contents: [] });
+        await expect(provider.listObjects('games/')).rejects.toThrow('repeated');
+    });
+
+    it('preserves operational failures and not-found semantics without exposing SDK request credentials', async () => {
+        const provider = Object.create(R2StorageProvider.prototype);
+        provider.isConfigured = true;
+        const secret = 'test-only-sensitive-request-detail';
+        provider.client = { send: vi.fn(async () => { throw Object.assign(new Error(secret), { $metadata: { httpStatusCode: 403 } }); }) };
+        await expect(provider.ping()).rejects.toMatchObject({ code: 'R2_STORAGE_FAILED', message: 'R2 storage operation failed (HTTP 403).' });
+        provider.client.send.mockRejectedValue(Object.assign(new Error(secret), { name: 'NoSuchKey', $metadata: { httpStatusCode: 404 } }));
+        await expect(provider.getObjectMetadata('games/a')).rejects.toMatchObject({ name: 'NotFound', $metadata: { httpStatusCode: 404 } });
+    });
+
     it('forwards inclusive byte ranges to object storage', async () => {
         const provider = Object.create(R2StorageProvider.prototype);
         provider.isConfigured = true;

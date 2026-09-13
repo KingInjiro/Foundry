@@ -1,7 +1,23 @@
 import { describe, expect, it } from 'vitest';
 import { createDeploymentProfile, validateFirebaseClientBuildConfig } from '../../../vite.config.js';
+import { profileSupportsStorage } from '../../../src/platform/backend/config/storageConfig.js';
+import { r2TestEnvironment } from '../../helpers/r2TestEnvironment.mjs';
 
 describe('Firebase client production build configuration', () => {
+    it('advertises runtime storage capabilities without embedding R2 server configuration', () => {
+        const serverEnv = r2TestEnvironment();
+        const profile = createDeploymentProfile({ ...serverEnv, FOUNDRY_DEPLOYMENT_MODE: 'single-host', FOUNDRY_STORAGE_PROVIDER: 'r2' }, 'production');
+        expect(profile).toEqual({ schemaVersion: 2, deploymentMode: 'single-host', authProvider: 'local', storageProvider: 'r2', supportedStorageProviders: ['local-disk', 'r2'] });
+        for (const value of [serverEnv.R2_ACCOUNT_ID, serverEnv.R2_ACCESS_KEY_ID, serverEnv.R2_SECRET_ACCESS_KEY, serverEnv.R2_ENDPOINT]) {
+            expect(JSON.stringify(profile)).not.toContain(value);
+        }
+        expect(profileSupportsStorage(profile, 'single-host', 'local-disk')).toBe(true);
+        expect(profileSupportsStorage(profile, 'single-host', 'r2')).toBe(true);
+        expect(profileSupportsStorage({ ...profile, supportedStorageProviders: ['r2', 'anything'] }, 'single-host', 'r2')).toBe(false);
+        expect(profileSupportsStorage({ ...profile, supportedStorageProviders: ['r2', 'r2'] }, 'single-host', 'r2')).toBe(false);
+        expect(profileSupportsStorage({ ...profile, firebaseProjectId: 'cloud-project' }, 'single-host', 'r2')).toBe(false);
+    });
+
     const valid = {
         FOUNDRY_DEPLOYMENT_MODE: 'cloud',
         VITE_FIREBASE_API_KEY: 'public-key',
@@ -23,7 +39,8 @@ describe('Firebase client production build configuration', () => {
             schemaVersion: 2,
             deploymentMode: 'single-host',
             authProvider: 'local',
-            storageProvider: 'local-disk'
+            storageProvider: 'local-disk',
+            supportedStorageProviders: ['local-disk', 'r2']
         });
     });
 

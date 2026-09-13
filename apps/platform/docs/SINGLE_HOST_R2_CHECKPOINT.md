@@ -64,3 +64,13 @@ Minimum upload policy: exact Foundry HTTPS origin, PUT, Content-Type; no wildcar
 - https://developers.cloudflare.com/r2/examples/aws/aws-sdk-js-v3/
 
 Live R2 verifier remains optional owner acceptance. Real bucket configuration, credentials and production changes are outside this PR's execution.
+
+## CP1 — configuration/provider/profile foundation
+
+- Explicit storage selection is implemented, with legacy defaults and fail-closed incomplete R2 configuration. Local auth/database topology is unchanged.
+- New single-host profiles advertise both storage capabilities. Legacy profiles still require their declared provider; cloud remains Firebase/R2.
+- Platform CSP permits only the two exact validated SDK account/bucket upload origins. Sandbox/CSRF/session policies remain unchanged.
+- R2 uses the factory's explicit env. SDK errors remain rejecting/observable but omit request credentials; prefix scope and pagination fail closed.
+- Focused testing proved the installed SDK signed only `host` for PUT by default. Explicit `signableHeaders: content-type` now binds the already-required upload content type; no client flow change or quota increase.
+- Focused config/provider/profile/security/R2 tests: **72/72 PASS, 5 files**. An initial new assertion caught the unsigned Content-Type; it was fixed in the presigner rather than removed.
+- Remote backup/restore/integrity, rollback and controlled S3/browser lifecycle acceptance are NEXT. This partial checkpoint is not ready for production enablement.

@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { validateProductionConfiguration } from '../../../src/platform/backend/config/productionConfig.js';
+import { r2TestEnvironment } from '../../helpers/r2TestEnvironment.mjs';
 
 const tempDirectories = [];
 
@@ -100,7 +101,52 @@ afterEach(() => {
     }
 });
 
+function validHybridEnv(overrides = {}) {
+    const env = validSingleHostEnv({
+        ...r2TestEnvironment(), FOUNDRY_STORAGE_PROVIDER: 'r2', LOCAL_STORAGE_SIGNING_SECRET: '', ...overrides
+    });
+    fs.writeFileSync(env.PLATFORM_CLIENT_BUILD_PROFILE, JSON.stringify({
+        schemaVersion: 2, deploymentMode: 'single-host', authProvider: 'local',
+        storageProvider: 'local-disk', supportedStorageProviders: ['local-disk', 'r2']
+    }));
+    return env;
+}
+
 describe('production configuration', () => {
+    it('accepts explicit hybrid storage without local objects, signing secret or Firebase', () => {
+        const env = validHybridEnv();
+        fs.rmSync(path.join(env.FOUNDRY_DATA_DIR, 'objects'), { recursive: true });
+        const config = validateProductionConfiguration(env);
+        expect(config).toMatchObject({ deploymentMode: 'single-host', authProvider: 'local', storageProvider: 'r2', objectStoragePath: null, firebaseProjectId: null });
+        expect(config.databasePath).toBe(env.PLATFORM_DB_PATH);
+        expect(config.r2UploadOrigins).toEqual([env.R2_ENDPOINT, `https://${env.R2_BUCKET_NAME}.${env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`]);
+        expect(JSON.stringify(config)).not.toContain(env.R2_SECRET_ACCESS_KEY);
+        expect(JSON.stringify(config)).not.toContain(env.R2_ACCESS_KEY_ID);
+    });
+
+    it.each(['R2_ACCOUNT_ID', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_BUCKET_NAME', 'R2_ENDPOINT'])('rejects hybrid storage missing %s', key => {
+        expect(() => validateProductionConfiguration(validHybridEnv({ [key]: '' }))).toThrow(`${key} is required`);
+    });
+
+    it.each([
+        [{ R2_DIRECT_DOWNLOADS: 'true' }, 'must remain false'],
+        [{ R2_ENDPOINT: 'https://other.example.test' }, 'account endpoint'],
+        [{ R2_UPLOAD_URL_TTL_SECONDS: '3601' }, 'R2_UPLOAD_URL_TTL_SECONDS'],
+        [{ R2_DOWNLOAD_URL_TTL_SECONDS: '901' }, 'R2_DOWNLOAD_URL_TTL_SECONDS'],
+        [{ FOUNDRY_STORAGE_PROVIDER: 'R2' }, 'exactly local-disk or r2']
+    ])('rejects unsafe hybrid configuration %j', (overrides, message) => {
+        expect(() => validateProductionConfiguration(validHybridEnv(overrides))).toThrow(message);
+    });
+
+    it('requires explicit build capability before enabling R2 with an older single-host artifact', () => {
+        const env = validSingleHostEnv({ ...r2TestEnvironment(), FOUNDRY_STORAGE_PROVIDER: 'r2' });
+        expect(() => validateProductionConfiguration(env)).toThrow('selected storage provider');
+    });
+
+    it('preserves cloud R2 and refuses to turn cloud into disk storage', () => {
+        expect(() => validateProductionConfiguration(validProductionEnv({ FOUNDRY_STORAGE_PROVIDER: 'local-disk' }))).toThrow('Cloud deployment requires');
+    });
+
     it('accepts a complete fail-closed single-node profile', () => {
         const result = validateProductionConfiguration(validProductionEnv());
         expect(result).toMatchObject({

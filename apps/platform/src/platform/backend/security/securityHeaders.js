@@ -68,7 +68,7 @@ function developmentCsp(csp) {
     );
 }
 
-export function getSecurityHeaders(pathname, { hstsEnabled = false, development = false } = {}) {
+export function getSecurityHeaders(pathname, { hstsEnabled = false, development = false, storageUploadOrigins = [] } = {}) {
     const isFoundrySandbox = pathname === '/sandbox.html';
     const isGenericSandbox = pathname === '/generic-sandbox.html';
     const isApi = pathname === '/api' || pathname.startsWith('/api/');
@@ -82,7 +82,18 @@ export function getSecurityHeaders(pathname, { hstsEnabled = false, development 
 
     if (isFoundrySandbox) headers['Content-Security-Policy'] = FOUNDRY_SANDBOX_CSP;
     else if (isGenericSandbox) headers['Content-Security-Policy'] = GENERIC_SANDBOX_CSP;
-    else if (!isApi) headers['Content-Security-Policy'] = PLATFORM_CSP;
+    else if (!isApi) {
+        for (const origin of storageUploadOrigins) {
+            const url = new URL(origin);
+            if (url.protocol !== 'https:' || url.origin !== origin || url.username || url.password
+                || !/^(?:[a-z0-9][a-z0-9.-]*\.)?[a-f0-9]{32}\.r2\.cloudflarestorage\.com$/.test(url.hostname)) {
+                throw new Error('Unsafe storage upload origin.');
+            }
+        }
+        headers['Content-Security-Policy'] = storageUploadOrigins.length
+            ? PLATFORM_CSP.replace("connect-src 'self'", `connect-src 'self' ${storageUploadOrigins.join(' ')}`)
+            : PLATFORM_CSP;
+    }
     if (development && headers['Content-Security-Policy']) {
         headers['Content-Security-Policy'] = developmentCsp(headers['Content-Security-Policy']);
     }
