@@ -2,7 +2,7 @@ import { LocalSqliteProvider } from '../database/LocalSqliteProvider.js';
 import { LocalDiskStorageProvider } from '../storage/LocalDiskStorageProvider.js';
 import { R2StorageProvider } from '../storage/R2StorageProvider.js';
 import { DEPLOYMENT_MODES } from './deploymentMode.js';
-import { resolveStorageProvider } from './storageConfig.js';
+import { resolveStorageProvider, resolveR2ObjectPrefix } from './storageConfig.js';
 
 export function createProductionStorage(productionConfig, env = process.env) {
     if (![DEPLOYMENT_MODES.SINGLE_HOST, DEPLOYMENT_MODES.CLOUD].includes(productionConfig?.deploymentMode)) {
@@ -20,6 +20,8 @@ export function createProductionStorage(productionConfig, env = process.env) {
     }
     const storage = new R2StorageProvider({ env });
     if (!storage.isConfigured) throw new Error('Selected R2 storage is not configured.');
+    try { resolveR2ObjectPrefix(env, productionConfig.deploymentMode === DEPLOYMENT_MODES.SINGLE_HOST); }
+    catch (error) { storage.client.destroy(); throw error; }
     return storage;
 }
 

@@ -2,6 +2,18 @@ import { DEPLOYMENT_MODES, resolveDeploymentMode } from './deploymentMode.js';
 
 export const STORAGE_PROVIDERS = Object.freeze(['local-disk', 'r2']);
 
+export function resolveR2ObjectPrefix(env = process.env, required = false) {
+    const prefix = env.R2_OBJECT_PREFIX || '';
+    if (!prefix && !required) return '';
+    if (!prefix) throw new Error('R2_OBJECT_PREFIX is required for single-host R2 storage.');
+    // One installation component: two configured prefixes cannot contain each
+    // other. Logical application keys remain unchanged in SQLite and URLs.
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(prefix)) {
+        throw new Error('R2_OBJECT_PREFIX must be a non-empty installation name (1-64 lowercase letters, digits, underscores or hyphens).');
+    }
+    return prefix;
+}
+
 export function resolveStorageProvider(env = process.env, deploymentMode = resolveDeploymentMode(env)) {
     const selected = env.FOUNDRY_STORAGE_PROVIDER;
     const provider = selected === undefined || selected === ''

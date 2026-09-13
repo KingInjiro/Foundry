@@ -8,6 +8,7 @@ export function r2TestEnvironment() {
         R2_ACCESS_KEY_ID: randomBytes(16).toString('hex'),
         R2_SECRET_ACCESS_KEY: randomBytes(32).toString('hex'),
         R2_BUCKET_NAME: 'foundry-test',
+        R2_OBJECT_PREFIX: 'test-installation',
         R2_ENDPOINT: `https://${account}.r2.cloudflarestorage.com`,
         R2_UPLOAD_URL_TTL_SECONDS: '900',
         R2_DOWNLOAD_URL_TTL_SECONDS: '120',

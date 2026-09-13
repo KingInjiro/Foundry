@@ -1,6 +1,7 @@
 import { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand, HeadBucketCommand, DeleteObjectCommand, DeleteObjectsCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { StorageProvider } from './StorageProvider.js';
+import { resolveR2ObjectPrefix } from '../config/storageConfig.js';
 
 export class R2StorageProvider extends StorageProvider {
     constructor({ env = process.env } = {}) {
@@ -10,6 +11,8 @@ export class R2StorageProvider extends StorageProvider {
         const accessKeyId = env.R2_ACCESS_KEY_ID;
         const secretAccessKey = env.R2_SECRET_ACCESS_KEY;
         const endpoint = env.R2_ENDPOINT;
+        this.endpoint = endpoint;
+        this.objectPrefix = resolveR2ObjectPrefix(env);
         
         this.bucketName = env.R2_BUCKET_NAME;
         this.isConfigured = !!(accountId && accessKeyId && secretAccessKey && this.bucketName && endpoint);
@@ -67,6 +70,16 @@ export class R2StorageProvider extends StorageProvider {
         return directory ? `${base}/` : prefix;
     }
 
+    physicalKey(key) {
+        this.safePrefix(key);
+        if (key.endsWith('/')) throw new Error('R2 object key must name a file.');
+        return `${this.objectPrefix ? `${this.objectPrefix}/` : ''}${key}`;
+    }
+
+    physicalPrefix(prefix, directory = false) {
+        return `${this.objectPrefix ? `${this.objectPrefix}/` : ''}${this.safePrefix(prefix, directory)}`;
+    }
+
     nextPage(response, seen) {
         if (!response.IsTruncated) return undefined;
         const token = response.NextContinuationToken;
@@ -83,7 +96,7 @@ export class R2StorageProvider extends StorageProvider {
         }
         const command = new PutObjectCommand({
             Bucket: this.bucketName,
-            Key: objectKey,
+            Key: this.physicalKey(objectKey),
             ContentType: contentType
         });
         const url = await this.sign(command, { expiresIn: this.uploadUrlTtlSeconds, signableHeaders: new Set(['content-type']) });
@@ -102,7 +115,7 @@ export class R2StorageProvider extends StorageProvider {
         }
         const command = new HeadObjectCommand({
             Bucket: this.bucketName,
-            Key: objectKey
+            Key: this.physicalKey(objectKey)
         });
         const response = await this.send(command);
         return {
@@ -120,7 +133,7 @@ export class R2StorageProvider extends StorageProvider {
         
         const command = new GetObjectCommand({
             Bucket: this.bucketName,
-            Key: objectKey,
+            Key: this.physicalKey(objectKey),
             ...(Number.isInteger(options.start) && Number.isInteger(options.end) && {
                 Range: `bytes=${options.start}-${options.end}`
             })
@@ -135,7 +148,7 @@ export class R2StorageProvider extends StorageProvider {
         }
         const command = new GetObjectCommand({
             Bucket: this.bucketName,
-            Key: objectKey,
+            Key: this.physicalKey(objectKey),
             ...(Number.isInteger(options.start) && Number.isInteger(options.end) && {
                 Range: `bytes=${options.start}-${options.end}`
             })
@@ -151,7 +164,7 @@ export class R2StorageProvider extends StorageProvider {
         }
         const command = new PutObjectCommand({
             Bucket: this.bucketName,
-            Key: objectKey,
+            Key: this.physicalKey(objectKey),
             Body: buffer,
             ContentType: contentType,
             ...(options.cacheControl && { CacheControl: options.cacheControl })
@@ -165,7 +178,7 @@ export class R2StorageProvider extends StorageProvider {
         }
         const command = new DeleteObjectCommand({
             Bucket: this.bucketName,
-            Key: objectKey
+            Key: this.physicalKey(objectKey)
         });
         await this.send(command);
     }
@@ -175,7 +188,7 @@ export class R2StorageProvider extends StorageProvider {
             throw new Error("R2 is not configured in this environment.");
         }
 
-        const normalizedPrefix = this.safePrefix(prefix, true);
+        const normalizedPrefix = this.physicalPrefix(prefix, true);
         const seenTokens = new Set();
         let continuationToken;
         do {
@@ -208,7 +221,7 @@ export class R2StorageProvider extends StorageProvider {
         if (!this.isConfigured) {
             throw new Error("R2 is not configured in this environment.");
         }
-        const normalizedPrefix = this.safePrefix(prefix);
+        const normalizedPrefix = this.physicalPrefix(prefix);
         const objects = [];
         const seenTokens = new Set();
         const seenKeys = new Set();
@@ -225,7 +238,7 @@ export class R2StorageProvider extends StorageProvider {
                 }
                 seenKeys.add(object.Key);
                 objects.push({
-                    key: object.Key,
+                    key: object.Key.slice(this.objectPrefix ? this.objectPrefix.length + 1 : 0),
                     size: Number(object.Size || 0),
                     lastModified: object.LastModified || null,
                     etag: object.ETag || null

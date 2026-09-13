@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DEPLOYMENT_MODES, resolveDeploymentMode } from './deploymentMode.js';
-import { profileSupportsStorage, resolveStorageProvider, r2UploadOrigins } from './storageConfig.js';
+import { profileSupportsStorage, resolveStorageProvider, resolveR2ObjectPrefix, r2UploadOrigins } from './storageConfig.js';
 
 const BOOLEAN_VALUES = new Set(['true', 'false']);
 const LOG_LEVELS = new Set(['debug', 'info', 'warn', 'error']);
@@ -269,6 +269,8 @@ export function validateProductionConfiguration(env = process.env) {
     }
 
     if (storageProvider === 'r2') {
+        try { resolveR2ObjectPrefix(env, deploymentMode === DEPLOYMENT_MODES.SINGLE_HOST); }
+        catch (error) { errors.push(error.message); }
         if (env.R2_DIRECT_DOWNLOADS === 'true') {
             errors.push('R2_DIRECT_DOWNLOADS must remain false in production because issued signed URLs cannot be revoked immediately by moderation.');
         }

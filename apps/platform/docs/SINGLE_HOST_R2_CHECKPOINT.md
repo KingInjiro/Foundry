@@ -74,3 +74,10 @@ Live R2 verifier remains optional owner acceptance. Real bucket configuration, c
 - Focused testing proved the installed SDK signed only `host` for PUT by default. Explicit `signableHeaders: content-type` now binds the already-required upload content type; no client flow change or quota increase.
 - Focused config/provider/profile/security/R2 tests: **72/72 PASS, 5 files**. An initial new assertion caught the unsigned Content-Type; it was fixed in the presigner rather than removed.
 - Remote backup/restore/integrity, rollback and controlled S3/browser lifecycle acceptance are NEXT. This partial checkpoint is not ready for production enablement.
+
+### CP1 installation namespace
+
+- Single-host R2 requires `R2_OBJECT_PREFIX`: one explicit 1–64 character lowercase installation name (letters, digits, underscores, hyphens). Existing cloud without this variable retains its unprefixed keys.
+- The provider maps every logical key to `<installation>/<key>`; SQLite, API paths and package format stay unchanged. Listings return logical keys; list/delete cannot target an empty/root prefix or another installation.
+- Tests exercise equal logical keys in two installations, metadata, reads, both presigned URLs, listings, single-object and prefix deletion, and traversal rejection. **67/67 PASS, 3 focused files**; initial missing-setting diagnostic mismatch corrected without relaxing assertions.
+- Namespace is not a substitute for bucket-scoped credentials. Use a private dedicated production bucket and a stable unique prefix; changing it is a storage change, not automatic data migration.
