@@ -1,3 +1,4 @@
+import { profileSupportsStorage } from '../src/platform/backend/config/storageConfig.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -36,10 +37,7 @@ if (
     || !Array.isArray(serverProfile.migrations)
     || serverProfile.migrations.at(-1)?.version !== serverProfile.maximumDatabaseMigration
 ) fail('server-profile.json is malformed.');
-const validBaseProfile = deploymentProfile.schemaVersion === 2
-    && new Set(['cloud', 'single-host']).has(deploymentProfile.deploymentMode)
-    && deploymentProfile.authProvider === (deploymentProfile.deploymentMode === 'cloud' ? 'firebase' : 'local')
-    && deploymentProfile.storageProvider === (deploymentProfile.deploymentMode === 'cloud' ? 'r2' : 'local-disk');
+const validBaseProfile = profileSupportsStorage(deploymentProfile, deploymentProfile.deploymentMode, deploymentProfile.storageProvider);
 const validCloudIdentity = deploymentProfile.deploymentMode !== 'cloud'
     || (Boolean(deploymentProfile.firebaseProjectId) && Boolean(deploymentProfile.firebaseAuthDomain));
 const validSingleHostIdentity = deploymentProfile.deploymentMode !== 'single-host'

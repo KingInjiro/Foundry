@@ -1,8 +1,89 @@
 import { DeleteObjectsCommand, GetObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { describe, expect, it, vi } from 'vitest';
 import { R2StorageProvider } from '../../../src/platform/backend/storage/R2StorageProvider.js';
+import { r2TestEnvironment } from '../../helpers/r2TestEnvironment.mjs';
+import { resolveR2ObjectPrefix } from '../../../src/platform/backend/config/storageConfig.js';
 
 describe('R2StorageProvider', () => {
+    it.each(['', '.', '..', '/', 'prod/other', 'prod/', 'Prod', 'prod%2fother', 'a'.repeat(65)])('rejects unsafe installation prefix %j', prefix => {
+        expect(() => resolveR2ObjectPrefix({ R2_OBJECT_PREFIX: prefix }, true)).toThrow('R2_OBJECT_PREFIX');
+    });
+
+    it('keeps installations isolated for reads, signed URLs, listings and deletion while returning logical keys', async () => {
+        const env = r2TestEnvironment();
+        const first = new R2StorageProvider({ env: { ...env, R2_OBJECT_PREFIX: 'prod' } });
+        const second = new R2StorageProvider({ env: { ...env, R2_OBJECT_PREFIX: 'prod-other' } });
+        const objects = new Map();
+        const transport = vi.fn(async command => {
+            const { Key, Prefix, Body, Delete } = command.input;
+            switch (command.constructor.name) {
+                case 'PutObjectCommand': objects.set(Key, Body); return {};
+                case 'HeadObjectCommand':
+                    if (!objects.has(Key)) throw Object.assign(new Error('missing'), { name: 'NotFound' });
+                    return { ContentLength: objects.get(Key).length };
+                case 'GetObjectCommand': return { Body: objects.get(Key) };
+                case 'DeleteObjectCommand': objects.delete(Key); return {};
+                case 'DeleteObjectsCommand': Delete.Objects.forEach(item => objects.delete(item.Key)); return {};
+                case 'ListObjectsV2Command': return { Contents: [...objects].filter(([key]) => key.startsWith(Prefix)).map(([key, body]) => ({ Key: key, Size: body.length })) };
+                default: throw new Error('Unexpected S3 command');
+            }
+        });
+        try {
+            first.client.send = transport;
+            second.client.send = transport;
+            await first.uploadBuffer('games/one/data', Buffer.from('first'), 'text/plain');
+            await second.uploadBuffer('games/one/data', Buffer.from('second'), 'text/plain');
+            expect([...objects.keys()]).toEqual(['prod/games/one/data', 'prod-other/games/one/data']);
+            expect(await first.getObjectMetadata('games/one/data')).toMatchObject({ contentLength: 5 });
+            expect((await second.getDownloadStream('games/one/data')).toString()).toBe('second');
+            expect(await first.listObjects('games/')).toEqual([expect.objectContaining({ key: 'games/one/data', size: 5 })]);
+            expect(new URL((await first.createUploadSession('games/one/zip')).uploadUrl).pathname).toContain('/prod/games/one/zip');
+            expect(new URL(await first.createDownloadUrl('games/one/data')).pathname).toContain('/prod/games/one/data');
+            await first.deletePrefix('games/one');
+            expect([...objects.keys()]).toEqual(['prod-other/games/one/data']);
+            await expect(first.getObjectMetadata('games/one/data')).rejects.toMatchObject({ name: 'NotFound' });
+            expect(await second.getObjectMetadata('games/one/data')).toMatchObject({ contentLength: 6 });
+            await second.deleteObject('games/one/data');
+            expect(objects.size).toBe(0);
+            const calls = transport.mock.calls.length;
+            await expect(first.deleteObject('../prod-other/games/one/data')).rejects.toThrow('unsafe');
+            await expect(first.listObjects('')).rejects.toThrow('unsafe');
+            await expect(first.deletePrefix('')).rejects.toThrow('unsafe');
+            expect(transport.mock.calls).toHaveLength(calls);
+        } finally { first.client.destroy(); second.client.destroy(); }
+    });
+
+    it.each(['', '/', '////', '.', '..', '/games/', 'games/../', 'games//', 'games\\bad', 'games/\u0000'])('refuses unsafe list/delete prefix %j before S3 calls', async prefix => {
+        const provider = Object.create(R2StorageProvider.prototype);
+        provider.isConfigured = true;
+        provider.client = { send: vi.fn() };
+        await expect(provider.listObjects(prefix)).rejects.toThrow('unsafe R2 prefix');
+        await expect(provider.deletePrefix(prefix)).rejects.toThrow('unsafe R2 prefix');
+        expect(provider.client.send).not.toHaveBeenCalled();
+    });
+
+    it('fails closed on incomplete pagination and does not delete out-of-prefix keys', async () => {
+        const provider = Object.create(R2StorageProvider.prototype);
+        provider.isConfigured = true;
+        provider.client = { send: vi.fn(async () => ({ IsTruncated: true, Contents: [] })) };
+        await expect(provider.listObjects('games/')).rejects.toThrow('pagination');
+        provider.client.send.mockResolvedValue({ Contents: [{ Key: 'other-tenant/object' }], IsTruncated: false });
+        await expect(provider.deletePrefix('games/one')).rejects.toThrow('escaped');
+        expect(provider.client.send.mock.calls.every(([command]) => command instanceof ListObjectsV2Command)).toBe(true);
+        provider.client.send.mockResolvedValue({ IsTruncated: true, NextContinuationToken: 'same', Contents: [] });
+        await expect(provider.listObjects('games/')).rejects.toThrow('repeated');
+    });
+
+    it('preserves operational failures and not-found semantics without exposing SDK request credentials', async () => {
+        const provider = Object.create(R2StorageProvider.prototype);
+        provider.isConfigured = true;
+        const secret = 'test-only-sensitive-request-detail';
+        provider.client = { send: vi.fn(async () => { throw Object.assign(new Error(secret), { $metadata: { httpStatusCode: 403 } }); }) };
+        await expect(provider.ping()).rejects.toMatchObject({ code: 'R2_STORAGE_FAILED', message: 'R2 storage operation failed (HTTP 403).' });
+        provider.client.send.mockRejectedValue(Object.assign(new Error(secret), { name: 'NoSuchKey', $metadata: { httpStatusCode: 404 } }));
+        await expect(provider.getObjectMetadata('games/a')).rejects.toMatchObject({ name: 'NotFound', $metadata: { httpStatusCode: 404 } });
+    });
+
     it('forwards inclusive byte ranges to object storage', async () => {
         const provider = Object.create(R2StorageProvider.prototype);
         provider.isConfigured = true;

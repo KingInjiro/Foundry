@@ -9,6 +9,7 @@ import { QuotaConfig } from './src/platform/backend/config/quotas.js';
 import { assertSafeRuntimeMode } from './src/platform/backend/config/runtimeMode.js';
 import { validateProductionConfiguration } from './src/platform/backend/config/productionConfig.js';
 import { createProductionProviders } from './src/platform/backend/config/productionProviders.js';
+import { checkStorageIntegrity } from './src/platform/backend/storage/StorageIntegrityChecker.js';
 
 function getCleanupIntervalMs() {
     const configured = Number(process.env.UPLOAD_CLEANUP_INTERVAL_MS);
@@ -129,6 +130,11 @@ async function startServer() {
                 res.sendStatus(403);
             }
         });
+    }
+
+    if (productionConfig.production && productionConfig.deploymentMode === 'single-host') {
+        const integrity = await checkStorageIntegrity(db, storage);
+        if (integrity.status !== 'PASS') throw new Error(`Production storage integrity failed (${integrity.counts.missingOrInvalid} issue(s)); changing storage does not migrate objects.`);
     }
 
     // API routes FIRST

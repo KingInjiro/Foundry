@@ -290,6 +290,7 @@ export function createApp(injectedDb, injectedStorage, jobQueue, options = {}) {
 
     app.use(applySecurityHeaders({
         hstsEnabled: Boolean(runtimeConfig.hstsEnabled),
+        storageUploadOrigins: storage.kind === 'r2' ? runtimeConfig.r2UploadOrigins || [] : [],
         development: runtimeConfig.production !== true && process.env.NODE_ENV !== 'production'
     }));
 

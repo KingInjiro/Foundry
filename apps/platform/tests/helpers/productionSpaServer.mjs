@@ -11,7 +11,7 @@ const platformRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 
 
 // A separate compiled production process, with no Google preload/credentials
 // and no auth bypass. Its disposable client files model extracted ZIP mtimes.
-export async function startProductionSpaServer() {
+export async function startProductionSpaServer({ r2 = null } = {}) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'foundry-production-spa-'));
     const data = path.join(root, 'data');
     const logs = [];
@@ -77,21 +77,34 @@ export async function startProductionSpaServer() {
             E2E_MODE: 'false', SINGLE_HOST_TEST_MODE: 'false', LOCAL_DEV_MODE: 'false',
             AUTH_DEV_BYPASS: 'false', ALLOW_UNREADY_STARTUP: 'false'
         };
+        env.FOUNDRY_STORAGE_PROVIDER = r2 ? 'r2' : 'local-disk';
+        if (r2) Object.assign(env, r2.env, { FOUNDRY_TEST_R2_ORIGIN: r2.origin });
         delete env.GOOGLE_OAUTH_CLIENT_ID;
         delete env.GOOGLE_OAUTH_CLIENT_SECRET;
         delete env.NODE_OPTIONS;
-        backend = spawn(process.execPath, ['dist/server.cjs'], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
-        backendExited = new Promise(resolve => { backend.once('exit', resolve); backend.once('error', resolve); });
-        await new Promise((resolve, reject) => {
-            backend.once('error', reject);
-            backend.once('exit', code => reject(new Error(`Production SPA backend exited (${code}): ${logs.join('')}`)));
-            backend.stderr.on('data', chunk => logs.push(String(chunk)));
-            backend.stdout.on('data', chunk => {
-                logs.push(String(chunk));
-                if (logs.join('').includes('"event":"server_started"')) resolve();
+        const startBackend = async () => {
+            let startupOutput = '';
+            const preload = r2 ? ['--import', fileURLToPath(new URL('./r2E2E.mjs', import.meta.url))] : [];
+            backend = spawn(process.execPath, [...preload, 'dist/server.cjs'], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
+            backendExited = new Promise(resolve => { backend.once('exit', resolve); backend.once('error', resolve); });
+            await new Promise((resolve, reject) => {
+                backend.once('error', reject);
+                backend.once('exit', code => reject(new Error(`Production SPA backend exited (${code}): ${logs.join('')}`)));
+                backend.stderr.on('data', chunk => logs.push(String(chunk)));
+                backend.stdout.on('data', chunk => {
+                    logs.push(String(chunk));
+                    startupOutput += String(chunk);
+                    if (startupOutput.includes('"event":"server_started"')) resolve();
+                });
             });
-        });
-        return { origin, index, legacyEtag, lastModified: archiveDate.toUTCString(), close };
+        };
+        const stopBackend = async () => {
+            if (backend && backend.exitCode === null && backend.signalCode === null) backend.kill('SIGTERM');
+            await backendExited;
+        };
+        await startBackend();
+        return { origin, index, legacyEtag, lastModified: archiveDate.toUTCString(), close, data, logs, stopBackend,
+            async restart() { await stopBackend(); await startBackend(); } };
     } catch (error) {
         await close();
         throw error;

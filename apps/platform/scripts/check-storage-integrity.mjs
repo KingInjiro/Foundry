@@ -1,7 +1,8 @@
 import path from 'node:path';
 import { LocalSqliteProvider } from '../src/platform/backend/database/LocalSqliteProvider.js';
 import { LocalDiskStorageProvider } from '../src/platform/backend/storage/LocalDiskStorageProvider.js';
-import { R2StorageProvider } from '../src/platform/backend/storage/R2StorageProvider.js';
+import { createProductionStorage } from '../src/platform/backend/config/productionProviders.js';
+import { resolveStorageProvider } from '../src/platform/backend/config/storageConfig.js';
 import { checkStorageIntegrity } from '../src/platform/backend/storage/StorageIntegrityChecker.js';
 import { DEPLOYMENT_MODES, resolveDeploymentMode } from '../src/platform/backend/config/deploymentMode.js';
 
@@ -18,11 +19,11 @@ if (deploymentMode === DEPLOYMENT_MODES.SINGLE_HOST && (!dataDirectory || !path.
     process.exit(1);
 }
 const database = new LocalSqliteProvider(databasePath);
-const storage = deploymentMode === DEPLOYMENT_MODES.SINGLE_HOST
+const storage = resolveStorageProvider(process.env, deploymentMode) === 'local-disk'
     ? new LocalDiskStorageProvider(path.join(path.resolve(dataDirectory), 'objects'), '/unused', {
         uploadSigningSecret: process.env.LOCAL_STORAGE_SIGNING_SECRET
     })
-    : new R2StorageProvider();
+    : createProductionStorage({ deploymentMode, storageProvider: 'r2' });
 try {
     if (!storage.isConfigured) throw new Error('Configured object storage is unavailable for integrity verification.');
     const report = await checkStorageIntegrity(database, storage);
@@ -33,4 +34,5 @@ try {
     process.exitCode = 1;
 } finally {
     await database.close();
+    storage.client?.destroy();
 }

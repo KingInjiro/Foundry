@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createProductionProviders } from '../../../src/platform/backend/config/productionProviders.js';
+import { r2TestEnvironment } from '../../helpers/r2TestEnvironment.mjs';
 
 const roots = [];
 const originalR2 = {};
@@ -16,6 +17,37 @@ afterEach(async () => {
 });
 
 describe('production provider selection', () => {
+    it('selects configured R2 from explicit env in single-host and produces an expiring S3 upload, not a local route', async () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'foundry-hybrid-provider-'));
+        roots.push(root);
+        const env = r2TestEnvironment();
+        const providers = createProductionProviders({ deploymentMode: 'single-host', storageProvider: 'r2', databasePath: path.join(root, 'platform.db') }, env);
+        try {
+            expect(providers.storage.kind).toBe('r2');
+            expect(providers.storage.uploadRoute).toBeUndefined();
+            const { uploadUrl } = await providers.storage.createUploadSession('games/one/versions/two/package.zip');
+            const url = new URL(uploadUrl);
+            expect(url.protocol).toBe('https:');
+            expect(url.hostname).toContain(env.R2_ACCOUNT_ID);
+            expect(url.pathname).toContain('/games/one/versions/two/package.zip');
+            expect(url.searchParams.get('X-Amz-Expires')).toBe('900');
+            expect(url.searchParams.get('X-Amz-SignedHeaders')).toContain('content-type');
+            expect(providers.storage.directDownloadsEnabled).toBe(false);
+            await providers.database.ping();
+        } finally {
+            await providers.database.close();
+            providers.storage.client.destroy();
+        }
+    });
+
+    it('fails before opening SQLite when explicit R2 is incomplete; never falls back to disk', () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'foundry-hybrid-provider-'));
+        roots.push(root);
+        const dbPath = path.join(root, 'platform.db');
+        expect(() => createProductionProviders({ deploymentMode: 'single-host', storageProvider: 'r2', databasePath: dbPath }, {})).toThrow('Selected R2 storage is not configured');
+        expect(fs.existsSync(dbPath)).toBe(false);
+    });
+
     it('constructs SQLite plus signed local-disk storage for single-host mode', async () => {
         const root = fs.mkdtempSync(path.join(os.tmpdir(), 'foundry-production-provider-'));
         roots.push(root);

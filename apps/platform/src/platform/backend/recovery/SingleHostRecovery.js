@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createSqliteBackup, restoreSqliteBackup, verifySqliteDatabase } from '../database/SqliteRecovery.js';
+import { EXTERNAL_STORAGE_BACKUP_FORMAT, createExternalInventory, verifyExternalInventory } from './ExternalStorageRecovery.js';
 
 export const SINGLE_HOST_BACKUP_FORMAT = 'foundry-single-host-backup-v1';
 
@@ -82,19 +83,25 @@ function readManifest(backupDirectory) {
     } catch {
         throw new Error('Single-host backup manifest.json is invalid JSON.');
     }
-    if (manifest?.format !== SINGLE_HOST_BACKUP_FORMAT || manifest?.deploymentMode !== 'single-host') {
+    if (![SINGLE_HOST_BACKUP_FORMAT, EXTERNAL_STORAGE_BACKUP_FORMAT].includes(manifest?.format) || manifest?.deploymentMode !== 'single-host') {
         throw new Error('Unsupported or mismatched single-host backup format.');
     }
     if (!Array.isArray(manifest?.objects?.files)) throw new Error('Single-host backup object manifest is invalid.');
     return manifest;
 }
 
-export async function verifySingleHostBackup(backupDirectory) {
+export async function verifySingleHostBackup(backupDirectory, { storage = null } = {}) {
     const backupRoot = assertAbsoluteNonRoot(backupDirectory, 'Backup directory');
     const manifest = readManifest(backupRoot);
     const databasePath = path.join(backupRoot, 'platform.db');
     const database = verifySqliteDatabase(databasePath);
     if (database.sha256 !== manifest.database?.sha256) throw new Error('Backup database hash does not match manifest.');
+
+    if (manifest.format === EXTERNAL_STORAGE_BACKUP_FORMAT) {
+        const objects = await verifyExternalInventory(storage, databasePath, manifest.objects);
+        return { status: 'PASS', backupDirectory: backupRoot, format: manifest.format, createdAt: manifest.createdAt, database, objects, manifest };
+    }
+    if (storage?.kind === 'r2') throw new Error('Local-disk backup cannot be restored or verified as R2; object migration is not automatic.');
 
     const expected = new Map();
     for (const entry of manifest.objects.files) {
@@ -139,14 +146,16 @@ export async function createSingleHostBackup({
     outputDirectory,
     databasePath = null,
     applicationVersion = 'unknown',
-    releaseId = 'unknown'
+    releaseId = 'unknown',
+    storage = null
 }) {
     const dataRoot = assertAbsoluteNonRoot(dataDirectory, 'Data directory');
     const outputRoot = assertAbsoluteNonRoot(outputDirectory, 'Backup output directory');
     const sourceDatabase = path.resolve(databasePath || path.join(dataRoot, 'platform.db'));
     const sourceObjects = path.join(dataRoot, 'objects');
     if (!fs.statSync(dataRoot, { throwIfNoEntry: false })?.isDirectory()) throw new Error('Data directory does not exist.');
-    if (!fs.statSync(sourceObjects, { throwIfNoEntry: false })?.isDirectory()) throw new Error('Object directory does not exist.');
+    const external = storage?.kind === 'r2';
+    if (!external && !fs.statSync(sourceObjects, { throwIfNoEntry: false })?.isDirectory()) throw new Error('Object directory does not exist.');
     if (fs.existsSync(outputRoot)) throw new Error('Backup output already exists; backups are never overwritten.');
     const parent = path.dirname(outputRoot);
     if (!fs.statSync(parent, { throwIfNoEntry: false })?.isDirectory()) throw new Error('Backup parent directory must already exist.');
@@ -154,16 +163,20 @@ export async function createSingleHostBackup({
     const temporary = path.join(parent, `.${path.basename(outputRoot)}.${crypto.randomUUID()}.partial`);
     try {
         await fs.promises.mkdir(temporary, { mode: 0o700 });
-        await fs.promises.mkdir(path.join(temporary, 'objects'), { mode: 0o750 });
+        if (!external) await fs.promises.mkdir(path.join(temporary, 'objects'), { mode: 0o750 });
         const database = createSqliteBackup({ sourcePath: sourceDatabase, outputPath: path.join(temporary, 'platform.db') });
-        const objects = await copyFilesWithManifest(sourceObjects, path.join(temporary, 'objects'), { ignoreTemp: true });
+        const objects = external
+            ? await createExternalInventory(storage, path.join(temporary, 'platform.db'))
+            : { directory: 'objects', ...await copyFilesWithManifest(sourceObjects, path.join(temporary, 'objects'), { ignoreTemp: true }) };
         const manifest = {
-            format: SINGLE_HOST_BACKUP_FORMAT,
+            format: external ? EXTERNAL_STORAGE_BACKUP_FORMAT : SINGLE_HOST_BACKUP_FORMAT,
             deploymentMode: 'single-host',
             createdAt: new Date().toISOString(),
             applicationVersion: String(applicationVersion || 'unknown'),
             releaseId: String(releaseId || 'unknown'),
-            consistency: 'Application service must be stopped while this coordinated DB + object snapshot is created.',
+            consistency: external
+                ? 'Stop the application and external writers. Remote bytes are NOT backed up: this is SQLite plus a verified R2 inventory. Restoring requires unchanged surviving remote objects; independent R2 disaster recovery is required.'
+                : 'Application service must be stopped while this coordinated DB + object snapshot is created.',
             database: {
                 file: 'platform.db',
                 sizeBytes: database.sizeBytes,
@@ -172,36 +185,39 @@ export async function createSingleHostBackup({
                 foreignKeyViolations: database.foreignKeyViolations,
                 schemaMigrations: database.schemaMigrations
             },
-            objects: { directory: 'objects', ...objects },
+            objects,
             excluded: ['environment files', 'session secret', 'storage signing secret', 'TLS private keys', 'temporary uploads']
         };
         await fs.promises.writeFile(path.join(temporary, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600, flag: 'wx' });
-        await verifySingleHostBackup(temporary);
+        await verifySingleHostBackup(temporary, { storage });
         await fs.promises.rename(temporary, outputRoot);
-        return verifySingleHostBackup(outputRoot);
+        return verifySingleHostBackup(outputRoot, { storage });
     } catch (error) {
         await fs.promises.rm(temporary, { recursive: true, force: true });
         throw error;
     }
 }
 
-export async function restoreSingleHostBackup({ backupDirectory, targetDataDirectory }) {
+export async function restoreSingleHostBackup({ backupDirectory, targetDataDirectory, storage = null }) {
     const backupRoot = assertAbsoluteNonRoot(backupDirectory, 'Backup directory');
     const targetRoot = assertAbsoluteNonRoot(targetDataDirectory, 'Restore target data directory');
     if (fs.existsSync(targetRoot)) throw new Error('Restore target already exists; single-host restore never overwrites data.');
     const parent = path.dirname(targetRoot);
     if (!fs.statSync(parent, { throwIfNoEntry: false })?.isDirectory()) throw new Error('Restore target parent directory must already exist.');
-    const verifiedBackup = await verifySingleHostBackup(backupRoot);
+    const verifiedBackup = await verifySingleHostBackup(backupRoot, { storage });
+    const external = verifiedBackup.format === EXTERNAL_STORAGE_BACKUP_FORMAT;
     const temporary = path.join(parent, `.${path.basename(targetRoot)}.${crypto.randomUUID()}.partial`);
     try {
         await fs.promises.mkdir(temporary, { mode: 0o700 });
-        await fs.promises.mkdir(path.join(temporary, 'objects'), { mode: 0o750 });
+        if (!external) await fs.promises.mkdir(path.join(temporary, 'objects'), { mode: 0o750 });
         const databaseRestore = restoreSqliteBackup({
             backupPath: path.join(backupRoot, 'platform.db'),
             targetPath: path.join(temporary, 'platform.db')
         });
-        const copiedObjects = await copyFilesWithManifest(path.join(backupRoot, 'objects'), path.join(temporary, 'objects'));
-        await fs.promises.mkdir(path.join(temporary, 'objects', '.tmp'), { mode: 0o750 });
+        const copiedObjects = external
+            ? { ...await verifyExternalInventory(storage, path.join(temporary, 'platform.db'), verifiedBackup.manifest.objects), files: [] }
+            : await copyFilesWithManifest(path.join(backupRoot, 'objects'), path.join(temporary, 'objects'));
+        if (!external) await fs.promises.mkdir(path.join(temporary, 'objects', '.tmp'), { mode: 0o750 });
         if (
             copiedObjects.count !== verifiedBackup.objects.count
             || copiedObjects.totalBytes !== verifiedBackup.objects.totalBytes

@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createSingleHostBackup } from '../src/platform/backend/recovery/SingleHostRecovery.js';
+import { createRecoveryStorage } from '../src/platform/backend/recovery/ExternalStorageRecovery.js';
 
 function argument(name) {
     const index = process.argv.indexOf(name);
@@ -21,7 +22,10 @@ if (!fs.statSync(backupParent, { throwIfNoEntry: false })?.isDirectory()) {
 }
 const compactTimestamp = new Date().toISOString().replaceAll(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
 const outputDirectory = path.resolve(argument('--output') || path.join(backupParent, `foundry-backup-${compactTimestamp}`));
+const storage = createRecoveryStorage();
+try {
 const result = await createSingleHostBackup({
+    storage,
     dataDirectory,
     databasePath: argument('--db') || process.env.PLATFORM_DB_PATH,
     outputDirectory,
@@ -29,3 +33,4 @@ const result = await createSingleHostBackup({
     releaseId: process.env.FOUNDRY_RELEASE_ID || 'unknown'
 });
 console.log(JSON.stringify({ operation: 'single_host_backup', ...result, manifest: undefined }, null, 2));
+} finally { storage?.client?.destroy(); }

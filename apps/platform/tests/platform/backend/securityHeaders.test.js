@@ -2,6 +2,21 @@ import { describe, expect, it } from 'vitest';
 import { getSecurityHeaders } from '../../../src/platform/backend/security/securityHeaders.js';
 
 describe('surface-specific production security headers', () => {
+    it('permits only exact R2 upload origins on Platform while leaving sandbox, scripts and auth policies intact', () => {
+        const origin = 'https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com';
+        const options = { storageUploadOrigins: [origin] };
+        const before = getSecurityHeaders('/');
+        const after = getSecurityHeaders('/', options);
+        expect(after['Content-Security-Policy']).toBe(before['Content-Security-Policy'].replace("connect-src 'self'", `connect-src 'self' ${origin}`));
+        for (const surface of ['/sandbox.html', '/generic-sandbox.html', '/api/auth/local/session']) {
+            expect(getSecurityHeaders(surface, options)).toEqual(getSecurityHeaders(surface));
+        }
+    });
+
+    it.each(['https://*.r2.cloudflarestorage.com', 'https://evil.example.test', 'https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com/path'])('rejects unsafe upload CSP origin %s', origin => {
+        expect(() => getSecurityHeaders('/', { storageUploadOrigins: [origin] })).toThrow();
+    });
+
     it('keeps the Platform SPA non-frameable and free of unsafe script execution', () => {
         const headers = getSecurityHeaders('/developer');
         expect(headers['X-Frame-Options']).toBe('DENY');
