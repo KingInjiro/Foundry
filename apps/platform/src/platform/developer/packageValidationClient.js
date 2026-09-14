@@ -9,6 +9,12 @@ async function validateDirectly(file, limits) {
 }
 
 export async function validatePackageOffMainThread(file, { limits, signal } = {}) {
+    // Existing Editor handoff callers share this validator but do not open the
+    // upload dialog. They must resolve runtime quotas before reading the ZIP too.
+    if (limits === undefined) {
+        const { apiClient } = await import('../api/apiClient.js');
+        limits = await apiClient.json.get('/api/config/upload-limits', { signal, cache: 'no-store' });
+    }
     toValidationQuotas(limits);
     if (signal?.aborted) throw new DOMException('Validation cancelled.', 'AbortError');
     if (typeof Worker !== 'function') return validateDirectly(file, limits);

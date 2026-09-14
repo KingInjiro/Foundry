@@ -2,6 +2,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import JSZip from 'jszip';
 import { createHash } from 'node:crypto';
 import { validatePackageOffMainThread } from '../../../src/platform/developer/packageValidationClient.js';
+import { apiClient } from '../../../src/platform/api/apiClient.js';
+
+vi.mock('../../../src/platform/api/apiClient.js', () => ({ apiClient: { json: { get: vi.fn() } } }));
 
 const limits = { maxPackageSizeBytes: 2147483648, maxFileSizeBytes: 2147483648,
     maxTotalExtractedSizeBytes: 4294967296, maxFilesPerPackage: 1000, maxExtractedFilesPerPackage: 1000 };
@@ -12,13 +15,33 @@ class TestWorker extends EventTarget {
     postMessage(message) { this.message = message; }
 }
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.unstubAllGlobals(); vi.resetAllMocks(); });
 
 describe('package validation runtime configuration', () => {
     it('requires complete numeric runtime limits before creating a worker', async () => {
         const worker = vi.fn();
         vi.stubGlobal('Worker', worker);
-        await expect(validatePackageOffMainThread({ size: 100 })).rejects.toThrow('invalid upload limits');
+        await expect(validatePackageOffMainThread({ size: 100 }, { limits: {} })).rejects.toThrow('invalid upload limits');
+        expect(worker).not.toHaveBeenCalled();
+    });
+
+    it('resolves runtime limits for existing Editor callers without a supplied configuration', async () => {
+        vi.stubGlobal('Worker', TestWorker);
+        TestWorker.instance = null;
+        apiClient.json.get.mockResolvedValue(limits);
+        const result = validatePackageOffMainThread({ size: 100 });
+        await vi.waitFor(() => expect(TestWorker.instance?.message.limits).toEqual(limits));
+        expect(apiClient.json.get).toHaveBeenCalledWith('/api/config/upload-limits', { signal: undefined, cache: 'no-store' });
+        const worker = TestWorker.instance;
+        worker.dispatchEvent(new MessageEvent('message', { data: { requestId: worker.message.requestId, result: { valid: true } } }));
+        await expect(result).resolves.toEqual({ valid: true });
+    });
+
+    it('does not read a package when the implicit runtime config request fails', async () => {
+        const worker = vi.fn();
+        vi.stubGlobal('Worker', worker);
+        apiClient.json.get.mockRejectedValue(new Error('Runtime config unavailable'));
+        await expect(validatePackageOffMainThread({ size: 100 })).rejects.toThrow('Runtime config unavailable');
         expect(worker).not.toHaveBeenCalled();
     });
 
