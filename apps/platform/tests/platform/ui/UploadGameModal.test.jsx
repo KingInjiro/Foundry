@@ -6,8 +6,17 @@ import { MemoryRouter } from 'react-router-dom';
 import JSZip from 'jszip';
 import { UploadGameModal } from '../../../src/platform/developer/UploadGameModal.jsx';
 import { apiClient } from '../../../src/platform/api/apiClient.js';
+import * as validationClient from '../../../src/platform/developer/packageValidationClient.js';
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+
+const runtimeLimits = {
+    maxPackageSizeBytes: 2147483648,
+    maxFileSizeBytes: 2147483648,
+    maxTotalExtractedSizeBytes: 4294967296,
+    maxFilesPerPackage: 1000,
+    maxExtractedFilesPerPackage: 1000
+};
 
 async function makePackage({ includeManifest = true } = {}) {
     const zip = new JSZip();
@@ -48,17 +57,99 @@ describe('UploadGameModal', () => {
     let container;
     let root;
 
+    async function renderModal(isOpen = true) {
+        await act(async () => root.render(<MemoryRouter><UploadGameModal isOpen={isOpen} onClose={vi.fn()} /></MemoryRouter>));
+    }
+
     beforeEach(async () => {
         container = document.createElement('div');
         document.body.appendChild(container);
         root = createRoot(container);
-        await act(async () => {
-            root.render(
-                <MemoryRouter>
-                    <UploadGameModal isOpen onClose={vi.fn()} />
-                </MemoryRouter>
-            );
-        });
+        vi.spyOn(apiClient.json, 'get').mockResolvedValue(runtimeLimits);
+        await renderModal();
+    });
+
+    it('shows the server-provided maximum, fetched same-origin without cached build quotas', () => {
+        expect(container.textContent).toContain('Maximum 2.0 GB');
+        expect(apiClient.json.get).toHaveBeenCalledWith('/api/config/upload-limits', expect.objectContaining({ cache: 'no-store', signal: expect.any(AbortSignal) }));
+        expect(container.querySelector('input[type="file"]').disabled).toBe(false);
+    });
+
+    it.each([128 * 1024 * 1024, runtimeLimits.maxPackageSizeBytes])('allows a valid ZIP with modeled size %i through real local validation', async size => {
+        const file = await makePackage();
+        // Model the size boundary without allocating hundreds of MiB in unit tests.
+        Object.defineProperty(file, 'size', { value: size });
+        await chooseFile(container, file);
+        await waitForText(container, 'Package is ready');
+        expect(container.textContent).not.toContain('the limit is');
+        expect(container.textContent).toContain('Maximum 2.0 GB');
+    });
+
+    it('rejects a file above the runtime maximum before reading or uploading it', async () => {
+        const validate = vi.spyOn(validationClient, 'validatePackageOffMainThread');
+        const upload = vi.spyOn(apiClient.json, 'post');
+        const file = await makePackage();
+        Object.defineProperty(file, 'size', { value: runtimeLimits.maxPackageSizeBytes + 1 });
+        await chooseFile(container, file);
+        expect(container.textContent).toContain('the limit is 2.0 GB');
+        expect(validate).not.toHaveBeenCalled();
+        expect(upload).not.toHaveBeenCalled();
+        expect([...container.querySelectorAll('button')].some(button => button.textContent.includes('Upload Version'))).toBe(false);
+    });
+
+    it('blocks selection and drop while the limit is unknown, then uses the resolved limit', async () => {
+        await renderModal(false);
+        let resolveLimits;
+        apiClient.json.get.mockImplementation(() => new Promise(resolve => { resolveLimits = resolve; }));
+        await renderModal();
+        const validate = vi.spyOn(validationClient, 'validatePackageOffMainThread');
+        const input = container.querySelector('input[type="file"]');
+        expect(input.disabled).toBe(true);
+        expect(container.textContent).toContain('Loading upload limits');
+        const file = await makePackage();
+        await chooseFile(container, file);
+        const drop = new Event('drop', { bubbles: true });
+        Object.defineProperty(drop, 'dataTransfer', { value: { files: [file] } });
+        await act(async () => input.parentElement.dispatchEvent(drop));
+        expect(validate).not.toHaveBeenCalled();
+        await act(async () => resolveLimits({ ...runtimeLimits, maxPackageSizeBytes: 256 * 1024 * 1024 }));
+        expect(input.disabled).toBe(false);
+        expect(container.textContent).toContain('Maximum 256 MB');
+    });
+
+    it('shows a safe retriable configuration error without a numeric fallback', async () => {
+        await renderModal(false);
+        apiClient.json.get.mockRejectedValueOnce(new Error('Network offline'));
+        await renderModal();
+        expect(container.textContent).toContain("Could not load the server's upload limits");
+        expect(container.querySelector('input[type="file"]').disabled).toBe(true);
+        expect(container.textContent).not.toContain('Maximum');
+        await act(async () => [...container.querySelectorAll('button')].find(button => button.textContent === 'Retry Upload Limits').click());
+        expect(container.textContent).toContain('Maximum 2.0 GB');
+        expect(container.querySelector('input[type="file"]').disabled).toBe(false);
+    });
+
+    it.each([null, {}, { ...runtimeLimits, maxPackageSizeBytes: '2147483648' }, { ...runtimeLimits, maxPackageSizeBytes: Infinity }])('fails closed for invalid runtime config %j', async response => {
+        await renderModal(false);
+        apiClient.json.get.mockResolvedValueOnce(response);
+        await renderModal();
+        expect(container.textContent).toContain("Could not load the server's upload limits");
+        expect(container.querySelector('input[type="file"]').disabled).toBe(true);
+    });
+
+    it('ignores a stale response from a closed dialog and refreshes limits on reopen', async () => {
+        await renderModal(false);
+        let resolveOld;
+        apiClient.json.get.mockImplementationOnce(() => new Promise(resolve => { resolveOld = resolve; }));
+        await renderModal();
+        const oldSignal = apiClient.json.get.mock.calls.at(-1)[1].signal;
+        await renderModal(false);
+        expect(oldSignal.aborted).toBe(true);
+        apiClient.json.get.mockResolvedValueOnce({ ...runtimeLimits, maxPackageSizeBytes: 1024 * 1024 });
+        await renderModal();
+        await act(async () => resolveOld(runtimeLimits));
+        expect(container.textContent).toContain('Maximum 1.0 MB');
+        expect(container.textContent).not.toContain('Maximum 2.0 GB');
     });
 
     afterEach(async () => {

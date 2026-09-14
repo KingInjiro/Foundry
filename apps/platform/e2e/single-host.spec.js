@@ -8,6 +8,50 @@ import { controlledR2 } from '../tests/helpers/controlledR2.mjs';
 import { createSingleHostBackup, verifySingleHostBackup } from '../src/platform/backend/recovery/SingleHostRecovery.js';
 import { rehearseSingleHostBackup } from '../src/platform/backend/recovery/SingleHostRehearsal.js';
 
+test.describe('compiled runtime upload limits', () => {
+  let server;
+  test.beforeAll(async () => {
+    server = await startProductionSpaServer({ quotaEnv: {
+      PLATFORM_MAX_STORAGE_BYTES_PER_USER: '8589934592',
+      PLATFORM_MAX_PACKAGE_SIZE_BYTES: '2147483648',
+      PLATFORM_MAX_TOTAL_EXTRACTED_SIZE_BYTES: '4294967296',
+      PLATFORM_MAX_FILE_SIZE_BYTES: '2147483648'
+    } });
+  });
+  test.afterAll(async () => { await server?.close(); });
+
+  test('uses process quotas in an already-built client and retries unavailable config safely', async ({ page }) => {
+    const errors = [];
+    page.on('pageerror', error => errors.push(error.message));
+    await page.goto(server.origin);
+    await page.getByRole('button', { name: 'Sign In', exact: true }).click();
+    const auth = page.getByRole('dialog');
+    await auth.getByRole('tab', { name: 'Register' }).click();
+    await auth.getByLabel('Username').fill('runtime-limits-owner');
+    await auth.getByLabel('Password').fill(password);
+    await auth.getByRole('button', { name: 'Create Account' }).click();
+    await expect(auth).toBeHidden();
+    await page.goto(`${server.origin}/developer`);
+    await page.route('**/api/config/upload-limits', route => route.abort('connectionfailed'), { times: 1 });
+    await page.getByRole('button', { name: 'Upload Game Package' }).click();
+    const upload = page.getByRole('dialog');
+    await expect(upload.getByRole('alert')).toContainText("Could not load the server's upload limits");
+    await expect(upload.getByLabel('Choose game ZIP package')).toBeDisabled();
+    const responsePromise = page.waitForResponse(response => response.url() === `${server.origin}/api/config/upload-limits` && response.status() === 200);
+    await upload.getByRole('button', { name: 'Retry Upload Limits' }).click();
+    const response = await responsePromise;
+    expect(response.headers()['cache-control']).toBe('no-store');
+    expect((await response.json()).data.maxPackageSizeBytes).toBe(2147483648);
+    await expect(upload.getByText('Maximum 2.0 GB', { exact: true })).toBeVisible();
+    await expect(upload.getByLabel('Choose game ZIP package')).toBeEnabled();
+    await upload.getByLabel('Choose game ZIP package').setInputFiles(packagePath);
+    await expect(upload.getByText('Package is ready', { exact: true })).toBeVisible();
+    await upload.getByRole('button', { name: 'Upload Version' }).click();
+    await expect(upload.getByText('Version uploaded', { exact: true })).toBeVisible();
+    expect(errors).toEqual([]);
+  });
+});
+
 test.describe.serial('compiled single-host with private R2 objects', () => {
   test.use({ proxy: { server: 'http://127.0.0.1:3447', bypass: '127.0.0.1,localhost' } });
   let server;

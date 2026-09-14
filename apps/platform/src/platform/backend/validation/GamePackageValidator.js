@@ -38,9 +38,10 @@ export class GamePackageValidator {
     /**
      * Validates a game package.
      * @param {import('./GamePackageSource.js').GamePackageSource} source 
+     * @param {{ quotas?: object }} options Runtime quotas for browser preflight; server callers use QuotaConfig.
      * @returns {Promise<{valid: boolean, manifest: object|null, streamingManifestPath: string|null, errors: Array<{code: string, path?: string, message: string}>, warnings: Array<{code: string, message: string}>}>}
      */
-    async validate(source) {
+    async validate(source, { quotas = QuotaConfig } = {}) {
         const result = {
             valid: true,
             manifest: null,
@@ -62,8 +63,8 @@ export class GamePackageValidator {
             // 1. Check for path traversal and absolute paths in the archive itself
             const allFiles = await source.getFiles();
             const packageFiles = new Set(allFiles);
-            if (allFiles.length > QuotaConfig.PLATFORM_MAX_FILES_PER_PACKAGE) {
-                addError('TOO_MANY_FILES', `Package exceeds the maximum allowed number of files (${QuotaConfig.PLATFORM_MAX_FILES_PER_PACKAGE}).`);
+            if (allFiles.length > quotas.PLATFORM_MAX_FILES_PER_PACKAGE) {
+                addError('TOO_MANY_FILES', `Package exceeds the maximum allowed number of files (${quotas.PLATFORM_MAX_FILES_PER_PACKAGE}).`);
                 return result;
             }
             const portablePaths = new Map();
@@ -297,7 +298,7 @@ export class GamePackageValidator {
             if (result.valid && result.streamingManifestPath) {
                 const streamingManifestRaw = await source.readStreamingManifest(result.streamingManifestPath);
                 if (streamingManifestRaw) {
-                    const streamingResult = new StreamingManifestValidator().validate(streamingManifestRaw, packageFiles);
+                    const streamingResult = new StreamingManifestValidator().validate(streamingManifestRaw, packageFiles, { quotas });
                     for (const diagnostic of streamingResult.diagnostics) {
                         if (diagnostic.severity === 'ERROR') {
                             addError(diagnostic.code, diagnostic.message, result.streamingManifestPath);

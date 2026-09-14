@@ -752,6 +752,20 @@ export function createApp(injectedDb, injectedStorage, jobQueue, options = {}) {
         res.json({ success: true, data: linked });
     });
     
+    app.get('/api/config/upload-limits', (req, res) => {
+        res.setHeader('Cache-Control', 'no-store');
+        res.json({
+            success: true,
+            data: {
+                maxPackageSizeBytes: QuotaConfig.PLATFORM_MAX_PACKAGE_SIZE_BYTES,
+                maxFileSizeBytes: QuotaConfig.PLATFORM_MAX_FILE_SIZE_BYTES,
+                maxTotalExtractedSizeBytes: QuotaConfig.PLATFORM_MAX_TOTAL_EXTRACTED_SIZE_BYTES,
+                maxFilesPerPackage: QuotaConfig.PLATFORM_MAX_FILES_PER_PACKAGE,
+                maxExtractedFilesPerPackage: QuotaConfig.PLATFORM_MAX_EXTRACTED_FILES_PER_PACKAGE
+            }
+        });
+    });
+
     app.get('/api/health', (req, res) => {
         res.json({
             success: true,

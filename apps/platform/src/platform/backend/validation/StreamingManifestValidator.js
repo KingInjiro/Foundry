@@ -10,6 +10,7 @@ export class StreamingManifestValidator {
      * @param {Object} options Configuration options like quotas
      */
     validate(manifestRaw, packageFiles, options = {}) {
+        const quotas = options.quotas || QuotaConfig;
         const result = {
             valid: true,
             diagnostics: [],
@@ -104,7 +105,7 @@ export class StreamingManifestValidator {
                 addError('STREAMING_MANIFEST_INVALID', `Chunk ${chunk.id} has invalid size.`);
             } else {
                 totalSize += chunk.size;
-                if (chunk.size > QuotaConfig.PLATFORM_MAX_FILE_SIZE_BYTES) {
+                if (chunk.size > quotas.PLATFORM_MAX_FILE_SIZE_BYTES) {
                      addError('STREAMING_MANIFEST_LIMIT_EXCEEDED', `Chunk ${chunk.id} exceeds maximum file size.`);
                 }
             }
@@ -152,10 +153,10 @@ export class StreamingManifestValidator {
             graph.set(chunk.id, Array.from(deps));
         }
 
-        if (chunkIds.size > QuotaConfig.PLATFORM_MAX_EXTRACTED_FILES_PER_PACKAGE) {
+        if (chunkIds.size > quotas.PLATFORM_MAX_EXTRACTED_FILES_PER_PACKAGE) {
              addError('STREAMING_MANIFEST_LIMIT_EXCEEDED', `Too many chunks (${chunkIds.size}).`);
         }
-        if (totalSize > QuotaConfig.PLATFORM_MAX_TOTAL_EXTRACTED_SIZE_BYTES) {
+        if (totalSize > quotas.PLATFORM_MAX_TOTAL_EXTRACTED_SIZE_BYTES) {
             addError('STREAMING_MANIFEST_LIMIT_EXCEEDED', `Total size of chunks exceeds maximum allowed.`);
         }
 
