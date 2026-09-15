@@ -2,11 +2,10 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { AlertCircle, ArrowRight, CheckCircle2, FileArchive, UploadCloud, X } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { QuotaConfig } from '../backend/config/quotas.js';
+import { apiClient } from '../api/apiClient.js';
+import { parseUploadLimits } from './uploadLimits.js';
 import { validatePackageOffMainThread } from './packageValidationClient.js';
 import { uploadPackageToPlatform } from './platformUploadService.js';
-
-const MAX_PACKAGE_BYTES = Number(QuotaConfig.PLATFORM_MAX_PACKAGE_SIZE_BYTES);
 
 function formatBytes(bytes) {
     if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
@@ -20,6 +19,10 @@ export function UploadGameModal({ isOpen, onClose, gameId, recoverySession = nul
     const navigate = useNavigate();
     const fileInputRef = useRef(null);
     const uploadAbortRef = useRef(null);
+    const validationAbortRef = useRef(null);
+    const [uploadLimits, setUploadLimits] = useState(null);
+    const [limitsError, setLimitsError] = useState(false);
+    const [limitsAttempt, setLimitsAttempt] = useState(0);
     const [file, setFile] = useState(null);
     const [status, setStatus] = useState('idle');
     const [errors, setErrors] = useState([]);
@@ -37,6 +40,7 @@ export function UploadGameModal({ isOpen, onClose, gameId, recoverySession = nul
     const reset = () => {
         uploadAbortRef.current?.abort();
         uploadAbortRef.current = null;
+        validationAbortRef.current?.abort();
         setFile(null);
         setStatus('idle');
         setErrors([]);
@@ -54,10 +58,28 @@ export function UploadGameModal({ isOpen, onClose, gameId, recoverySession = nul
     };
 
     useEffect(() => {
-        if (isOpen) reset();
-    }, [isOpen]);
+        setUploadLimits(null);
+        setLimitsError(false);
+        if (!isOpen) return undefined;
+        reset();
+        const controller = new AbortController();
+        void apiClient.json.get('/api/config/upload-limits', { signal: controller.signal, cache: 'no-store' })
+            .then(value => {
+                if (!controller.signal.aborted) setUploadLimits(parseUploadLimits(value));
+            })
+            .catch(() => {
+                if (!controller.signal.aborted) setLimitsError(true);
+            });
+        return () => {
+            controller.abort();
+            validationAbortRef.current?.abort();
+        };
+    }, [isOpen, limitsAttempt]);
 
-    useEffect(() => () => uploadAbortRef.current?.abort(), []);
+    useEffect(() => () => {
+        uploadAbortRef.current?.abort();
+        validationAbortRef.current?.abort();
+    }, []);
 
     useEffect(() => {
         if (!isOpen) return undefined;
@@ -69,7 +91,8 @@ export function UploadGameModal({ isOpen, onClose, gameId, recoverySession = nul
     }, [isOpen, onClose, status]);
 
     const validateFile = async selected => {
-        if (!selected) return;
+        if (!selected || !uploadLimits) return;
+        validationAbortRef.current?.abort();
         setFile(selected);
         setErrors([]);
         setWarnings([]);
@@ -86,15 +109,18 @@ export function UploadGameModal({ isOpen, onClose, gameId, recoverySession = nul
             setErrors([{ code: 'INVALID_FILE_TYPE', message: 'Choose a ZIP package.' }]);
             return;
         }
-        if (selected.size > MAX_PACKAGE_BYTES) {
+        if (selected.size > uploadLimits.maxPackageSizeBytes) {
             setStatus('error');
-            setErrors([{ code: 'PACKAGE_SIZE_EXCEEDED', message: `Package is ${formatBytes(selected.size)}; the limit is ${formatBytes(MAX_PACKAGE_BYTES)}.` }]);
+            setErrors([{ code: 'PACKAGE_SIZE_EXCEEDED', message: `Package is ${formatBytes(selected.size)}; the limit is ${formatBytes(uploadLimits.maxPackageSizeBytes)}.` }]);
             return;
         }
 
         setStatus('validating');
+        const controller = new AbortController();
+        validationAbortRef.current = controller;
         try {
-            const result = await validatePackageOffMainThread(selected);
+            const result = await validatePackageOffMainThread(selected, { limits: uploadLimits, signal: controller.signal });
+            if (controller.signal.aborted) return;
             setWarnings(result.warnings || []);
             if (!result.valid) {
                 setStatus('error');
@@ -105,13 +131,14 @@ export function UploadGameModal({ isOpen, onClose, gameId, recoverySession = nul
             setStreamingManifestPath(result.streamingManifestPath || null);
             setStatus('valid');
         } catch (error) {
+            if (controller.signal.aborted) return;
             setStatus('error');
             setErrors([{ code: 'VALIDATION_EXCEPTION', message: error.message || 'The ZIP package could not be read.' }]);
         }
     };
 
     const handleUpload = async () => {
-        if (!file || !manifest || status === 'uploading') return;
+        if (!uploadLimits || !file || !manifest || status === 'uploading' || file.size > uploadLimits.maxPackageSizeBytes) return;
         setStatus('uploading');
         setErrors([]);
         setUploadRetryAvailable(false);
@@ -172,6 +199,7 @@ export function UploadGameModal({ isOpen, onClose, gameId, recoverySession = nul
 
     if (!isOpen) return null;
     const busy = status === 'uploading' || status === 'validating';
+    const selectionDisabled = busy || !uploadLimits;
 
     return (
         <AnimatePresence>
@@ -219,7 +247,7 @@ export function UploadGameModal({ isOpen, onClose, gameId, recoverySession = nul
                                 className={`border-2 border-dashed rounded-xl p-7 text-center transition-colors relative ${status === 'error' ? 'border-red-500/40 bg-red-500/5' : status === 'valid' ? 'border-green-500/40 bg-green-500/5' : dragActive ? 'border-blue-400 bg-blue-500/10' : 'border-neutral-700 hover:border-blue-500 bg-neutral-950/50'}`}
                                 onDragEnter={event => {
                                     event.preventDefault();
-                                    if (!busy) setDragActive(true);
+                                    if (!selectionDisabled) setDragActive(true);
                                 }}
                                 onDragOver={event => event.preventDefault()}
                                 onDragLeave={event => {
@@ -228,7 +256,7 @@ export function UploadGameModal({ isOpen, onClose, gameId, recoverySession = nul
                                 onDrop={event => {
                                     event.preventDefault();
                                     setDragActive(false);
-                                    if (!busy) void validateFile(event.dataTransfer.files?.[0]);
+                                    if (!selectionDisabled) void validateFile(event.dataTransfer.files?.[0]);
                                 }}
                             >
                                 <input
@@ -241,7 +269,7 @@ export function UploadGameModal({ isOpen, onClose, gameId, recoverySession = nul
                                         void validateFile(selectedFile);
                                     }}
                                     className="absolute inset-0 w-full h-full opacity-0 cursor-pointer disabled:cursor-not-allowed"
-                                    disabled={busy}
+                                    disabled={selectionDisabled}
                                     aria-label="Choose game ZIP package"
                                 />
                                 {file ? <FileArchive className="w-10 h-10 text-blue-400 mx-auto mb-3" /> : <UploadCloud className="w-10 h-10 text-neutral-500 mx-auto mb-3" />}
@@ -249,13 +277,23 @@ export function UploadGameModal({ isOpen, onClose, gameId, recoverySession = nul
                                     {file ? file.name : 'Drop a ZIP here or click to browse'}
                                 </div>
                                 <div className="text-xs text-neutral-500 mt-1">
-                                    {file ? formatBytes(file.size) : `Maximum ${formatBytes(MAX_PACKAGE_BYTES)}`}
+                                    {uploadLimits
+                                        ? `${file ? `${formatBytes(file.size)} · ` : ''}Maximum ${formatBytes(uploadLimits.maxPackageSizeBytes)}`
+                                        : limitsError ? 'Upload limits unavailable' : 'Loading upload limits…'}
                                 </div>
                             </div>
                         </div>
                     )}
 
                     <div aria-live="polite">
+                        {limitsError && (
+                            <div className="text-red-300 text-sm mb-4" role="alert">
+                                <p>Could not load the server's upload limits. Check your connection and retry before choosing a package.</p>
+                                <button type="button" onClick={() => setLimitsAttempt(attempt => attempt + 1)} className="mt-2 underline font-medium">
+                                    Retry Upload Limits
+                                </button>
+                            </div>
+                        )}
                         {status === 'validating' && (
                             <div className="flex items-center gap-2 text-yellow-300 text-sm mb-4" role="status">
                                 <div className="w-4 h-4 border-2 border-yellow-300 border-t-transparent rounded-full animate-spin" />
@@ -332,6 +370,7 @@ export function UploadGameModal({ isOpen, onClose, gameId, recoverySession = nul
                             <button
                                 type="button"
                                 onClick={handleUpload}
+                                disabled={!uploadLimits}
                                 className="bg-blue-600 hover:bg-blue-500 text-white px-6 py-2.5 rounded-lg text-sm font-bold transition-colors flex items-center justify-center gap-2"
                             >
                                 {status === 'error' ? 'Retry Upload' : 'Upload Version'} <ArrowRight className="w-4 h-4" />

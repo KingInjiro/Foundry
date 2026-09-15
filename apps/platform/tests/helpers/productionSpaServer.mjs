@@ -11,7 +11,7 @@ const platformRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 
 
 // A separate compiled production process, with no Google preload/credentials
 // and no auth bypass. Its disposable client files model extracted ZIP mtimes.
-export async function startProductionSpaServer({ r2 = null } = {}) {
+export async function startProductionSpaServer({ r2 = null, quotaEnv = {} } = {}) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'foundry-production-spa-'));
     const data = path.join(root, 'data');
     const logs = [];
@@ -66,6 +66,7 @@ export async function startProductionSpaServer({ r2 = null } = {}) {
         const origin = `https://127.0.0.1:${proxy.address().port}`;
         const env = {
             ...process.env,
+            ...quotaEnv,
             NODE_ENV: 'production', FOUNDRY_DEPLOYMENT_MODE: 'single-host',
             PLATFORM_PUBLIC_BASE_URL: origin,
             PLATFORM_CLIENT_BUILD_PROFILE: path.join(root, 'dist/client/deployment-profile.json'),

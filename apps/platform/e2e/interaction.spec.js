@@ -31,6 +31,8 @@ test.describe('Buttons, forms, and modal semantics', () => {
 
     await page.getByRole('button', { name: 'Upload Game Package' }).click();
     dialog = page.getByRole('dialog', { name: 'Upload Game Package' });
+    // setInputFiles bypasses enabled checks; wait for runtime quotas first.
+    await expect(dialog.getByLabel('Choose game ZIP package')).toBeEnabled();
     await dialog.getByLabel('Choose game ZIP package').setInputFiles('e2e/fixtures/missing-manifest-game.zip');
     await expect(dialog.getByText('Package needs attention')).toBeVisible();
     await dialog.getByRole('button', { name: 'Cancel' }).click();
@@ -49,6 +51,7 @@ test.describe('Buttons, forms, and modal semantics', () => {
 
     await page.getByRole('button', { name: 'Upload Version' }).click();
     const dialog = page.getByRole('dialog', { name: 'Upload New Version' });
+    await expect(dialog.getByLabel('Choose game ZIP package')).toBeEnabled();
     await dialog.getByLabel('Choose game ZIP package').setInputFiles(await versionedGamePackage('2.0.0'));
     await expect(dialog.getByText('Package is ready')).toBeVisible();
     await dialog.getByRole('button', { name: 'Upload Version' }).click();
